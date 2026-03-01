@@ -6,9 +6,20 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from dotenv import load_dotenv
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 load_dotenv()
+
+# Endpoints allowed to access this server
+origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com/"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Base Models for structuring responses from LLM
 class ChatRequest(BaseModel):
