@@ -12,7 +12,7 @@ app = FastAPI()
 load_dotenv()
 
 # Endpoints allowed to access this server
-origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com/"]
+origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
