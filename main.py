@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import Literal
 import uvicorn
@@ -7,12 +7,14 @@ from openai.types.chat import ChatCompletionMessageParam
 from dotenv import load_dotenv
 import os
 from fastapi.middleware.cors import CORSMiddleware
+import base64
+
 
 app = FastAPI()
 load_dotenv()
 
 # Endpoints allowed to access this server
-origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com"]
+origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
@@ -25,6 +27,9 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     thread_id: str | None = None
     message: str
+
+class TTSRequest(BaseModel):
+    text: str
 
 class PrecheckResponse(BaseModel):
     user_message: str | None = None
@@ -110,6 +115,32 @@ async def precheck(request: ChatRequest):
         tip=result.tip,
         suggestions=result.suggestions
     )
+
+# TTS endpoint ...
+@app.post("/tts")
+async def tts(request: TTSRequest):
+    # Step 1: get audio
+    response = await client_chat.audio.speech.create(
+        model="kokoro",
+        voice="af_heart",
+        input=request.text,
+        speed=1.0
+    )
+    audio_bytes = response.content
+
+    # Step 2: get word timestamps from Whisper
+    transcript = await client_chat.audio.transcriptions.create(
+        model="whisper-large-v3",
+        file=("audio.mp3", audio_bytes, "audio/mpeg"),
+        response_format="verbose_json",
+        timestamp_granularities=["word"]
+    )
+
+    # Step 3: return both
+    return {
+        "audio": base64.b64encode(audio_bytes).decode("utf-8"),
+        "timestamps": transcript.words
+    }
 
 @app.get("/")
 async def root():
