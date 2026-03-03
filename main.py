@@ -8,7 +8,15 @@ from dotenv import load_dotenv
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import base64
-
+import os, re, json, math
+from typing import List, Dict, Tuple
+from pypdf import PdfReader
+import numpy as np
+import faiss
+import openai
+from contextlib import asynccontextmanager
+import pickle
+import glob
 
 app = FastAPI()
 load_dotenv()
@@ -22,6 +30,155 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# UF base URL for using LLM's w liteLLM + litellm api key
+base_url = "https://api.ai.it.ufl.edu"
+RASHI_LITELLM_KEY = os.getenv('RASHI_LITELLM_KEY')
+
+# Function to build a local RAG (From UF AI Agents Workshop)
+
+# ---- Choose an embedding model available on your Navigator proxy ----
+EMBED_MODEL = "nomic-embed-text-v1.5"  # change if your proxy uses a different name or a different model
+
+client_rag = openai.OpenAI(
+    api_key=RASHI_LITELLM_KEY,
+    base_url=base_url
+)
+
+def read_pdf_text(path: str) -> str:
+    reader = PdfReader(path)
+    pages = []
+    for p in reader.pages:
+        t = p.extract_text() or ""
+        # Remove extra whitespace and fix broken line breaks
+        t = re.sub(r'(\w)-\n(\w)', r'\1\2', t) # Fix hyphenated words at line breaks
+        t = re.sub(r'(?<!\n)\n(?!\n)', ' ', t) # Replace single newlines with spaces
+        pages.append(t)
+    return "\n".join(pages)
+
+def chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> List[str]:
+    # simple whitespace chunker (good enough to start)
+    text = re.sub(r"\s+", " ", text).strip()
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        chunks.append(text[start:end])
+        start = max(end - overlap, start + 1)
+    return chunks
+
+def embed_texts(texts: List[str], batch_size: int = 64) -> np.ndarray:
+    vecs = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        resp = client_rag.embeddings.create(model=EMBED_MODEL, input=batch)
+        vecs.extend([d.embedding for d in resp.data])
+    return np.array(vecs, dtype=np.float32)
+
+class LocalRAG:
+    def __init__(self):
+        self.index = None
+        self.texts: List[str] = []
+        self.meta: List[Dict] = []
+
+    def build_from_pdfs(self, pdf_paths: List[str]):
+        all_chunks = []
+        all_meta = []
+
+        for path in pdf_paths:
+            # Extract folder name (e.g., 'nih') and filename
+            # os.path.dirname(path) gets './docs/nih'
+            # os.path.basename(...) of that gets 'nih'
+            source_label = os.path.basename(os.path.dirname(path))
+            file_name = os.path.basename(path)
+            
+            print(f"📄 Processing {file_name} from source: {source_label}")
+            
+            raw = read_pdf_text(path)
+            chunks = chunk_text(raw)
+            
+            for j, c in enumerate(chunks):
+                all_chunks.append(c)
+                all_meta.append({
+                    "source": source_label,  # This will be 'nih', 'nci', etc.
+                    "file": file_name,
+                    "chunk_id": j
+                })
+
+        # ... keep your embedding and FAISS logic exactly as it was ...
+        emb = embed_texts(all_chunks)
+        dim = emb.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        faiss.normalize_L2(emb)
+        index.add(emb)
+
+        self.index = index
+        self.texts = all_chunks
+        self.meta = all_meta
+
+    def retrieve(self, query: str, k: int = 6) -> List[Dict]:
+        q = embed_texts([query])
+        faiss.normalize_L2(q)
+        scores, ids = self.index.search(q, k)
+        out = []
+        for score, idx in zip(scores[0], ids[0]):
+            if idx == -1:
+                continue
+            out.append({
+                "text": self.texts[idx],
+                "score": float(score),
+                "meta": self.meta[idx],
+            })
+        return out
+    
+    def save(self, folder="rag_storage"):
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        # Save the FAISS index
+        faiss.write_index(self.index, os.path.join(folder, "index.faiss"))
+        # Save the texts and metadata
+        with open(os.path.join(folder, "data.pkl"), "wb") as f:
+            pickle.dump({"texts": self.texts, "meta": self.meta}, f)
+
+    def load(self, folder="rag_storage"):
+        # Load the FAISS index
+        self.index = faiss.read_index(os.path.join(folder, "index.faiss"))
+        # Load the texts and metadata
+        with open(os.path.join(folder, "data.pkl"), "rb") as f:
+            data = pickle.load(f)
+            self.texts = data["texts"]
+            self.meta = data["meta"]
+
+print("AB TO BUILD LOCAL RAG")
+
+# 1. Define the lifespan logic
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    STORAGE_DIR = "rag_storage"
+    
+    if os.path.exists(STORAGE_DIR):
+        print("🚀 LOADING PERSISTED RAG...")
+        rag.load(STORAGE_DIR)
+    else:
+        print("🏗️ NO RAG FOUND. BUILDING...")
+        
+        # This pattern matches anything in docs/SUBFOLDER/*.pdf
+        # recursive=True ensures we catch docs/nih/folder2/file.pdf too
+        pdf_files = glob.glob("./docs/**/*.pdf", recursive=True)
+        
+        if not pdf_files:
+            print("⚠️ WARNING: No PDFs found in ./docs/ subfolders!")
+        else:
+            rag.build_from_pdfs(pdf_files)
+            rag.save(STORAGE_DIR)
+        
+    print("✅ RAG READY FOR QUERIES")
+    yield
+    print("🛑 SHUTTING DOWN...")
+
+# 2. Pass the lifespan to the FastAPI app
+app = FastAPI(lifespan=lifespan)
+rag = LocalRAG()
 
 # Base Models for structuring responses from LLM
 class ChatRequest(BaseModel):
@@ -38,12 +195,21 @@ class PrecheckResponse(BaseModel):
     tip: str | None = None                 # tooltip shown while typing
     suggestions: list[str] | None = None   # AI-generated suggestion chips
 
-# Set up LiteLLM client
+class SourceSnippet(BaseModel):
+    source: str       # e.g., "NIH"
+    file: str         # e.g., "guidelines.pdf"
+    content: str      # The specific sentence or paragraph used
+    why_this_snippet_addresses_the_question: str    # Why this specific bit matters
+
+class RAGResponse(BaseModel):
+    answer: str       # The high-level combined synthesis
+    citations: List[SourceSnippet] # List of specific snippets used
+    confidence: float # 0.0 to 1.0
+
 # Regular LiteLLM client for conversational responses (async)
-RASHI_LITELLM_KEY = os.getenv('RASHI_LITELLM_KEY')
 client_chat = AsyncOpenAI(
     api_key= RASHI_LITELLM_KEY,
-    base_url="https://api.ai.it.ufl.edu" # LiteLLM Proxy is OpenAI compatible, Read More: https://docs.litellm.ai/docs/proxy/user_keys
+    base_url= base_url # LiteLLM Proxy is OpenAI compatible, Read More: https://docs.litellm.ai/docs/proxy/user_keys
 )
 
 @app.post("/simple-chat")
@@ -139,6 +305,55 @@ async def tts(request: TTSRequest):
         "audio": base64.b64encode(audio_bytes).decode("utf-8"),
         "timestamps": transcript.words
     }
+    
+@app.post("/rag-chat")
+async def rag_chat(request: ChatRequest):
+    question = request.message
+    
+    # 1. Get RAG results
+    results = rag.retrieve(question, k=5)
+    
+    # 2. Format the "Raw Material" for the LLM
+    # We include IDs so the LLM can easily distinguish chunks
+    context_list = []
+    for i, res in enumerate(results):
+        m = res['meta']
+        context_list.append(
+            f"ID: {i}\nSOURCE: {m['source']}\nFILE: {m['file']}\nCONTENT: {res['text']}"
+        )
+    context_str = "\n\n---\n\n".join(context_list)
+
+    # 3. The System Prompt (Milo's older brother, the Researcher)
+    system_prompt = """
+        You are a clinical trials data synthesizer. 
+
+        RULES FOR CITATIONS:
+        1. MANDATORY: You must provide at least 2-3 citations from DIFFERENT sources if available.
+        2. VERBATIM REQUIREMENT: The 'content' must be a substantial block of text (3-4 full sentences). Note: The source text might have strange line breaks due to PDF formatting; ignore these and provide the full logical sentences.
+        3. NO HEADERS: Do not cite section titles or questions. Cite the actual data/findings/policy text.
+        4. SYNTHESIS: In your 'answer', explicitly mention the sources in a conversational way. e.g., "While the FDA focuses on X, the NIH documentation emphasizes Y." Or, "The FDA says X" and "NIH also mentions Y".
+        5. Keep your 'answer' to 150 words or less.
+
+        GOAL: 
+        Provide a detailed answer. If the user asks 'who runs trials', find the specific paragraphs listing sponsors, investigators, or institutions.
+    """
+
+    # 4. Call the LLM with .parse()
+    response = await client_chat.beta.chat.completions.parse(
+        model='gpt-4o-mini', # Mini is great at this; use 4o for very complex logic
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"CONTEXT:\n{context_str}\n\nQUESTION: {question}"}
+        ],
+        response_format=RAGResponse
+    )
+
+    return response.choices[0].message.parsed
+
+# --- How to run it ---
+# import asyncio
+# answer = asyncio.run(ask_knowledge_base("What are NCI's latest lung cancer findings?", rag))
+# print(answer)
 
 @app.get("/")
 async def root():
