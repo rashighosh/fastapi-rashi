@@ -18,25 +18,16 @@ from contextlib import asynccontextmanager
 import pickle
 import glob
 
-app = FastAPI()
 load_dotenv()
 
 # Endpoints allowed to access this server
 origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu"
 RASHI_LITELLM_KEY = os.getenv('RASHI_LITELLM_KEY')
 
 # Function to build a local RAG (From UF AI Agents Workshop)
-
 # ---- Choose an embedding model available on your Navigator proxy ----
 EMBED_MODEL = "nomic-embed-text-v1.5"  # change if your proxy uses a different name or a different model
 
@@ -151,6 +142,8 @@ class LocalRAG:
 
 print("AB TO BUILD LOCAL RAG")
 
+rag = LocalRAG()
+
 # 1. Define the lifespan logic
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -178,7 +171,14 @@ async def lifespan(app: FastAPI):
 
 # 2. Pass the lifespan to the FastAPI app
 app = FastAPI(lifespan=lifespan)
-rag = LocalRAG()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Base Models for structuring responses from LLM
 class ChatRequest(BaseModel):
