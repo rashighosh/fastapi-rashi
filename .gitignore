@@ -1,3 +1,4 @@
 .env
 fastapirashi/
 __pycache__/
+rag_questions.json

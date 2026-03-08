@@ -345,7 +345,9 @@ async def precheck(request: ChatRequest):
         - Message is a clear, decent question → label: "good", gesture: "thumbsup", tip: tell the user the question is good and why it's important to ask, suggestions: 1-2 related follow-up questions, in_scope: true
         - Message is detailed and well-formed → label: "good", gesture: "thumbsup", tip: tell the user the question is good and why it's important to ask, suggestions: 1-2 related follow-up questions, in_scope: true
         - Message touches on sensitive topics (risk, safety, fear, harm) → label: "thoughtful", gesture: "thinking", tip: let the user know it's good they're considering this and why it's good to consider, suggestions: 1-2 related gentle follow-up example questions, in_scope: true
-
+        - Message is a clear, decent question → label: "good", gesture: "thumbsup", tip: tell the user the question is good and why it's important to ask, suggestions: null, in_scope: true
+        - Message is detailed and well-formed → label: "good", gesture: "thumbsup", tip: tell the user the question is good and why it's important to ask, suggestions: null, in_scope: true
+        
         Suggestions should be short (under 7 words), phrased as questions, and specific to clinical trials.
         Respond ONLY with valid JSON. No preamble, no explanation, no markdown.
     """
