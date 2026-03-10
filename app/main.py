@@ -18,12 +18,14 @@ import openai
 from contextlib import asynccontextmanager
 import pickle
 import glob
+import io
+from pydub import AudioSegment
 from mangum import Mangum
 
 load_dotenv()
 
 # Endpoints allowed to access this server
-# origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
+origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu"
@@ -223,13 +225,13 @@ app = FastAPI()
 
 handler = Mangum(app)
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ─────────────────────────────────────────────
 # PYDANTIC MODELS
@@ -377,27 +379,67 @@ async def precheck(request: ChatRequest):
 # TTS endpoint ...
 @app.post("/tts")
 async def tts(request: TTSRequest):
-    # Step 1: get audio
-    response = await client_chat.audio.speech.create(
-        model="kokoro",
-        voice="af_heart",
-        input=request.text,
-        speed=1.0
-    )
-    audio_bytes = response.content
+    # Split text into sentences to prevent TTS/Whisper truncation
+    sentences = re.split(r'(?<=[.!?]) +', request.text)
+    
+    audio_segments = []
+    all_words = []
+    time_offset = 0.0
 
-    # Step 2: get word timestamps from Whisper
-    transcript = await client_chat.audio.transcriptions.create(
-        model="whisper-large-v3",
-        file=("audio.mp3", audio_bytes, "audio/mpeg"),
-        response_format="verbose_json",
-        timestamp_granularities=["word"]
-    )
+    for sentence in sentences:
+        if not sentence.strip():
+            continue
 
-    # Step 3: return both
+        # Step 1: Generate audio for the individual sentence
+        res = await client_chat.audio.speech.create(
+            model="kokoro", 
+            voice="af_heart", 
+            input=sentence, 
+            speed=1.0
+        )
+        
+        # Load into pydub to get accurate duration
+        chunk = AudioSegment.from_file(io.BytesIO(res.content), format="mp3")
+        audio_segments.append(chunk)
+
+        # Step 2: Get Whisper timestamps for this chunk
+        buf = io.BytesIO()
+        chunk.export(buf, format="mp3")
+        buf.seek(0)
+
+        transcript = await client_chat.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=("audio.mp3", buf, "audio/mpeg"),
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
+            prompt=sentence # Helps Whisper focus on this specific sentence
+        )
+
+        # Convert to dict for safe attribute access
+        transcript_dict = transcript.model_dump()
+        words_in_chunk = transcript_dict.get('words', [])
+
+        for w in words_in_chunk:
+            all_words.append({
+                "word": w["word"],
+                "start": w["start"] + time_offset,
+                "end": w["end"] + time_offset,
+            })
+
+        # Update the offset for the next sentence
+        time_offset += chunk.duration_seconds
+
+    # Step 3: Merge all audio chunks into one file
+    combined = AudioSegment.empty()
+    for seg in audio_segments:
+        combined += seg
+    
+    out = io.BytesIO()
+    combined.export(out, format="mp3")
+
     return {
-        "audio": base64.b64encode(audio_bytes).decode("utf-8"),
-        "timestamps": transcript.words
+        "audio": base64.b64encode(out.getvalue()).decode("utf-8"),
+        "timestamps": all_words
     }
     
 @app.post("/rag-chat")
@@ -422,11 +464,13 @@ async def rag_chat(request: ChatRequest):
         You are a clinical trials data synthesizer. 
 
         RULES FOR CITATIONS:
-        1. MANDATORY: You must provide at least 2-3 citations from DIFFERENT sources if available.
-        2. VERBATIM REQUIREMENT: The 'content' must be a substantial block of text (3-4 full sentences). Note: The source text might have strange line breaks due to PDF formatting; ignore these and provide the full logical sentences.
-        3. NO HEADERS: Do not cite section titles or questions. Cite the actual data/findings/policy text.
-        4. SYNTHESIS: In your 'answer', explicitly mention the sources in a conversational way. e.g., "While the FDA focuses on X, the NIH documentation emphasizes Y." Or, "The FDA says X" and "NIH also mentions Y".
-        5. Keep your 'answer' to 150 words or less.
+        1. MANDATORY: Provide 2-3 citations from DIFFERENT sources if available.
+        2. VERBATIM REQUIREMENT: The 'content' must be 2-3 full, logical sentences. 
+        3. NO HEADERS: Cite actual findings/policy text only.
+        4. SYNTHESIS: Mention sources conversationally (e.g., "According to the FDA...").
+        5. TTS OPTIMIZATION (CRITICAL): Keep your 'answer' under 80 words. 
+        - Use simple sentence structures.
+        - Avoid long lists of names or dates that can trip up the voice.
 
         GOAL: 
         Provide a detailed answer. If the user asks 'who runs trials', find the specific paragraphs listing sponsors, investigators, or institutions.
