@@ -25,7 +25,7 @@ from mangum import Mangum
 load_dotenv()
 
 # Endpoints allowed to access this server
-origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
+# origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu"
@@ -225,13 +225,13 @@ app = FastAPI()
 
 handler = Mangum(app)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 # ─────────────────────────────────────────────
 # PYDANTIC MODELS
