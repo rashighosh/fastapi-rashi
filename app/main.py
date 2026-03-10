@@ -18,8 +18,8 @@ import openai
 from contextlib import asynccontextmanager
 import pickle
 import glob
-import io
-from pydub import AudioSegment
+import io, wave, struct
+import soundfile as sf
 from mangum import Mangum
 
 load_dotenv()
@@ -376,69 +376,78 @@ async def precheck(request: ChatRequest):
         gesture=result.gesture
     )
 
+# Replace AudioSegment usage with this helper:
+def decode_mp3_to_pcm(mp3_bytes: bytes):
+    """Use soundfile + numpy — no ffmpeg needed"""
+    buf = io.BytesIO(mp3_bytes)
+    data, samplerate = sf.read(buf, dtype='int16')
+    return data, samplerate
+
+def encode_pcm_to_mp3(pcm_data, samplerate: int) -> bytes:
+    buf = io.BytesIO()
+    sf.write(buf, pcm_data, samplerate, format='mp3')
+    buf.seek(0)
+    return buf.read()
+
 # TTS endpoint ...
 @app.post("/tts")
 async def tts(request: TTSRequest):
-    # Split text into sentences to prevent TTS/Whisper truncation
     sentences = re.split(r'(?<=[.!?]) +', request.text)
     
-    audio_segments = []
     all_words = []
+    all_pcm = []
+    samplerate = None
     time_offset = 0.0
 
     for sentence in sentences:
         if not sentence.strip():
             continue
 
-        # Step 1: Generate audio for the individual sentence
         res = await client_chat.audio.speech.create(
-            model="kokoro", 
-            voice="af_heart", 
-            input=sentence, 
-            speed=1.0
+            model="kokoro", voice="af_heart", input=sentence, speed=1.0
         )
-        
-        # Load into pydub to get accurate duration
-        chunk = AudioSegment.from_file(io.BytesIO(res.content), format="mp3")
-        audio_segments.append(chunk)
 
-        # Step 2: Get Whisper timestamps for this chunk
-        buf = io.BytesIO()
-        chunk.export(buf, format="mp3")
-        buf.seek(0)
+        # Decode MP3 → PCM (soundfile uses libsndfile, no ffmpeg)
+        buf = io.BytesIO(res.content)
+        pcm, sr = sf.read(buf, dtype='int16')
+        if samplerate is None:
+            samplerate = sr
+        all_pcm.append(pcm)
 
+        duration = len(pcm) / sr
+
+        # Whisper this sentence
+        whisper_buf = io.BytesIO(res.content)
+        whisper_buf.name = "audio.mp3"
         transcript = await client_chat.audio.transcriptions.create(
             model="whisper-large-v3",
-            file=("audio.mp3", buf, "audio/mpeg"),
+            file=whisper_buf,
             response_format="verbose_json",
             timestamp_granularities=["word"],
-            prompt=sentence # Helps Whisper focus on this specific sentence
+            prompt=sentence
         )
+        for segment in transcript.model_dump().get("segments", []):
+            for word in segment.get("words", []):
+                all_words.append({
+                    "word": word["word"],
+                    "start": word["start"] + time_offset,
+                    "end": word["end"] + time_offset,
+                })
 
-        # Convert to dict for safe attribute access
-        transcript_dict = transcript.model_dump()
-        words_in_chunk = transcript_dict.get('words', [])
+        time_offset += duration
 
-        for w in words_in_chunk:
-            all_words.append({
-                "word": w["word"],
-                "start": w["start"] + time_offset,
-                "end": w["end"] + time_offset,
-            })
+    # Stitch PCM arrays
+    combined_pcm = np.concatenate(all_pcm, axis=0)
 
-        # Update the offset for the next sentence
-        time_offset += chunk.duration_seconds
-
-    # Step 3: Merge all audio chunks into one file
-    combined = AudioSegment.empty()
-    for seg in audio_segments:
-        combined += seg
-    
+    # Encode back to MP3
     out = io.BytesIO()
-    combined.export(out, format="mp3")
+    sf.write(out, combined_pcm, samplerate, format='mp3')
+    combined_audio = out.getvalue()
+
+    all_words = [w for w in all_words if w["end"] - w["start"] > 0.01]
 
     return {
-        "audio": base64.b64encode(out.getvalue()).decode("utf-8"),
+        "audio": base64.b64encode(combined_audio).decode("utf-8"),
         "timestamps": all_words
     }
     
