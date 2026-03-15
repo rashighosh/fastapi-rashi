@@ -24,8 +24,10 @@ from mangum import Mangum
 
 load_dotenv()
 
+useCORS = False
+
 # Endpoints allowed to access this server
-# origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
+origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu"
@@ -225,13 +227,14 @@ app = FastAPI()
 
 handler = Mangum(app)
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+if useCORS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,  # or specify your Amplify URL e.g. ["https://yourapp.amplifyapp.com"]
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # ─────────────────────────────────────────────
 # PYDANTIC MODELS
@@ -243,6 +246,7 @@ class ChatRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
+    character: str
 
 class PrecheckResponse(BaseModel):
     user_message: str | None = None
@@ -393,6 +397,12 @@ def encode_pcm_to_mp3(pcm_data, samplerate: int) -> bytes:
 @app.post("/tts")
 async def tts(request: TTSRequest):
     sentences = re.split(r'(?<=[.!?]) +', request.text)
+    character = request.character
+    characterVoice = "af_heart"
+    voiceSpeed = 1.0
+    if character == "companion":
+        characterVoice = "am_echo"
+        voiceSpeed = 1.2
     
     all_words = []
     all_pcm = []
@@ -404,7 +414,7 @@ async def tts(request: TTSRequest):
             continue
 
         res = await client_chat.audio.speech.create(
-            model="kokoro", voice="af_heart", input=sentence, speed=1.0
+            model="kokoro", voice=characterVoice, input=sentence, speed=voiceSpeed
         )
 
         # Decode MP3 → PCM (soundfile uses libsndfile, no ffmpeg)
