@@ -24,7 +24,7 @@ from mangum import Mangum
 
 load_dotenv()
 
-useCORS = False
+useCORS = True
 
 # Endpoints allowed to access this server
 origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
@@ -312,9 +312,8 @@ async def simple_chat(request: ChatRequest):
         return {"reply": response.choices[0].message.content}
     except Exception as e:
         return {"error": str(e)}
-
-@app.post("/precheck", response_model=PrecheckResponse)
-async def precheck(request: ChatRequest):
+    
+async def run_precheck(message: str) -> PrecheckResponse:
     # 1. Get similar questions from bank first
     # user_embedding = np.array(get_embedding(request.message))
     # scores = cosine_similarity([user_embedding], bank_embeddings)[0]
@@ -323,7 +322,6 @@ async def precheck(request: ChatRequest):
     # top_score = round(float(scores[top_indices[0]]), 4)  # 👈 best match score
     # print("SIMILAR TOP SCORE ARE", top_score)
     # print("SIMILAR ARE", similar)
-
     system_prompt = f"""
         You are evaluating whether a user's message is ready to be processed by a clinical trials assistant. You act like a friendly, conversational helper named Milo.
 
@@ -362,9 +360,9 @@ async def precheck(request: ChatRequest):
         model='gpt-4o-mini',
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": request.message}
+            {"role": "user", "content": message}
         ],
-        response_format=PrecheckResponse  # your Pydantic model
+        response_format=PrecheckResponse
     )
 
     result = response.choices[0].message.parsed
@@ -373,12 +371,80 @@ async def precheck(request: ChatRequest):
         raise HTTPException(status_code=500, detail="Failed to parse response")
 
     return PrecheckResponse(
-        user_message=request.message,
+        user_message=message,
         tip=result.tip,
         suggestions=result.suggestions,
         label=result.label,
         gesture=result.gesture
     )
+
+
+# existing endpoint unchanged
+@app.post("/precheck", response_model=PrecheckResponse)
+async def precheck(request: ChatRequest):
+    return await run_precheck(request.message)
+
+
+# landing endpoint now calls run_precheck directly
+@app.post("/landing-example")
+async def landing_example(request: ChatRequest):
+    precheck = await run_precheck(request.message)
+
+    suggestions_str = json.dumps(precheck.suggestions) if precheck.suggestions else "none"
+
+    system_prompt_example = f"""
+        You are Jordan, a warm and approachable virtual companion helping a user
+        navigate a clinical trial information tool. Your personality is friendly,
+        casual, and non-clinical — like a knowledgeable friend, not a doctor.
+
+        The user was asked: "What's one thing you've wondered about clinical trials?
+        Don't worry about getting it perfect — just type whatever comes to mind."
+
+        A precheck system has already analyzed their message and produced this:
+        - Label: "{precheck.label}"
+        - Tip: "{precheck.tip}"
+        - Suggestions: {suggestions_str}
+
+        Use this to craft a response with the following structure:
+        1. Briefly acknowledge their message — if label is "good" or "thoughtful",
+        affirm them warmly and naturally (e.g. "that's one of the most common
+        things people wonder about"). If "vague" or "unknown", be warm and
+        reassuring that it's a great starting point.
+        2. Before introducing the suggestions, add one short framing sentence
+        that explains why you're suggesting them — vary it based on label:
+        - If label is "good" or "thoughtful": use phrasing like
+            "To help you dig deeper into that..." or
+            "To help you explore that further..."
+        - If label is "vague" or "unknown" or user has nothing:
+            use phrasing like "To help get you started..." or
+            "To give you a jumping off point..."
+        Then introduce the suggestions naturally woven into a sentence using
+        phrasings like "I might suggest questions like X or Y" or
+        "some questions worth exploring might be X or Y".
+        Do not say "in the actual tool" or "in the demo".
+        3. In one sentence, describe your role using this exact framing:
+        "I'll be suggesting questions like these during the interaction to
+        support you during your information search."
+        4. Close with one sentence handing off to Dr. Alex:
+        "Now, click the button below to meet Doctor Alex, who will be actually answering your questions."
+
+        Keep it conversational and brief — 3 to 5 sentences max. Do not use
+        clinical jargon. Do not answer their question yourself. Do not ask any
+        follow-up questions. Do not break the fourth wall by referencing the
+        tool, demo, or onboarding.
+    """
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_prompt_example},
+        {"role": "user", "content": request.message}
+    ]
+
+    try:
+        response = await client_chat.chat.completions.create(
+            model='gpt-4o-mini', messages=messages, temperature=0
+        )
+        return {"reply": response.choices[0].message.content}
+    except Exception as e:
+        return {"error": str(e)}
 
 # Replace AudioSegment usage with this helper:
 def decode_mp3_to_pcm(mp3_bytes: bytes):
@@ -463,6 +529,7 @@ async def tts(request: TTSRequest):
     
 @app.post("/rag-chat")
 async def rag_chat(request: ChatRequest):
+    print("IN RAG CHAT")
     question = request.message
     
     # 1. Get RAG results
@@ -494,7 +561,7 @@ async def rag_chat(request: ChatRequest):
         GOAL: 
         Provide a detailed answer. If the user asks 'who runs trials', find the specific paragraphs listing sponsors, investigators, or institutions.
     """
-
+    print("IN RAG CHAT AB TO CALL LLM")
     # 4. Call the LLM with .parse()
     response = await client_chat.beta.chat.completions.parse(
         model='gpt-4o-mini', # Mini is great at this; use 4o for very complex logic
