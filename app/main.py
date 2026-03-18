@@ -24,7 +24,7 @@ from mangum import Mangum
 
 load_dotenv()
 
-useCORS = True
+# useCORS = True
 
 # Endpoints allowed to access this server
 origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
@@ -254,6 +254,10 @@ class PrecheckResponse(BaseModel):
     label: Literal["ready", "vague", "good", "thoughtful", "unknown"]
     tip: str | None = None                 # tooltip shown while typing
     suggestions: list[str] | None = None   # AI-generated suggestion chips
+
+class LandingExample(BaseModel):
+    response: str | None = None
+    suggestions: list[str] | None = None   # AI-generated suggestion chips
     
 class SourceSnippet(BaseModel):
     source: str       # e.g., "NIH"
@@ -342,7 +346,7 @@ async def run_precheck(message: str) -> PrecheckResponse:
 
         Use this guide to pick the right values:
         - Message is empty or just a few characters (not a full word) → label: "ready", gesture: "thumbsup", tip: null, suggestions: null, in_scope: true
-        - Message is small talk, a greeting, not relevant to clinical trials, or asking about a specific clinical trial → label: "unknown", gesture: "shrug", tip: tell the user Dr. Alex can only respond to questions about clinical trials, suggestions: 2-3 questions to ask about clinical trials, in_scope: false
+        - Message is small talk, a greeting, not relevant to clinical trials, or asking about a specific clinical trial (such as "i see" or "okay" or "where is the trial located") → label: "unknown", gesture: "shrug", tip: tell the user Dr. Alex can only respond to questions about clinical trials, suggestions: 2-3 questions to ask about clinical trials, in_scope: false
         - Message is incomplete → label: "vague", gesture: "shrug", tip: briefly explain why the suggestions relate to what the user typed, then ask if any match what they meant. For example: "Incomplete questions about X often mean Y or Z — did you mean one of these?", suggestions: 2-3 complete questions they might mean that is about clinical trials, in_scope: true
         - Message is too short or a fragment → label: "vague", gesture: "shrug", tip: briefly explain why the suggestions relate to what the user typed, then nudge them to expand. For example: "X often comes up around Y and Z — do any of these match?", suggestions: 2-3 complete example questions they might mean, in_scope: true
         - Message is vague or unfocused → label: "vague", gesture: "shrug", tip: briefly explain why the suggestions relate to what the user typed, then let them know a bit more detail would help. For example: "X can mean a few things — here are the most common ones!", suggestions: 2-3 example questions of what they might mean, in_scope: true
@@ -439,10 +443,11 @@ async def landing_example(request: ChatRequest):
     ]
 
     try:
-        response = await client_chat.chat.completions.create(
-            model='gpt-4o-mini', messages=messages, temperature=0
+        response = await client_chat.beta.chat.completions.parse(
+            model='gpt-4o-mini', messages=messages, temperature=0, response_format=LandingExample
         )
-        return {"reply": response.choices[0].message.content}
+        result = response.choices[0].message.parsed
+        return {"reply": result}
     except Exception as e:
         return {"error": str(e)}
 
