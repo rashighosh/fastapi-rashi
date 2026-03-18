@@ -24,7 +24,7 @@ from mangum import Mangum
 
 load_dotenv()
 
-# useCORS = True
+useCORS = False
 
 # Endpoints allowed to access this server
 origins = ["https://main.d1qbymvh7dh0n4.amplifyapp.com", "http://localhost:5173"]
