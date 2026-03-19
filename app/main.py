@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
+from logging_routes import router as log_router
 from pydantic import BaseModel
 from typing import Literal
 import uvicorn
@@ -224,6 +225,7 @@ QUESTION_BANK = [
 
 # 2. Pass the lifespan to the FastAPI app
 app = FastAPI()
+app.include_router(log_router)
 
 handler = Mangum(app)
 
