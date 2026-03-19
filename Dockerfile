@@ -10,10 +10,10 @@ RUN pip install -r requirements.txt --target "${LAMBDA_TASK_ROOT}" --no-cache-di
 COPY ./app/ ${LAMBDA_TASK_ROOT}/
 
 # For connecting to database
-RUN apt-get update && apt-get install -y unixodbc-dev curl gnupg \
-  && curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
-  && curl https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list \
-  && apt-get update && ACCEPT_EULA=Y apt-get install -y msodbcsql18
+RUN microdnf install -y unixODBC \
+  && python3 -c "import urllib.request; urllib.request.urlretrieve('https://packages.microsoft.com/config/rhel/8/prod.repo', '/etc/yum.repos.d/mssql-release.repo')" \
+  && ACCEPT_EULA=Y microdnf install -y msodbcsql18 \
+  && microdnf clean all
 
 # 3. Now your handler is just main.handler
 CMD ["main.handler"]
