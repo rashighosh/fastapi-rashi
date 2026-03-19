@@ -28,6 +28,10 @@ class SessionLog(BaseModel):
     condition: int
     start_time: str
 
+class LandingLog(BaseModel):
+    participant_id: str
+    landing_question: str  # full transcript JSON string
+
 class EventLog(BaseModel):
     participant_id: str
     events: str  # full events JSON string you're replacing each time
@@ -56,6 +60,17 @@ def log_session(body: SessionLog):
         )
         conn.commit()
     return {"message": "session logged"}
+
+@router.post("/log-landing")
+def long_landing(body: LandingLog):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE {table_name} SET landing_question = ? WHERE participant_id = ?",
+            body.landing_question, body.participant_id
+        )
+        conn.commit()
+    return {"message": "events updated"}
 
 @router.post("/log-events")
 def log_events(body: EventLog):
