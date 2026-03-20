@@ -28,13 +28,13 @@ class SessionLog(BaseModel):
     condition: int
     start_time: str
 
-class LandingLog(BaseModel):
+class LandingQuestionLog(BaseModel):
     participant_id: str
     landing_question: str  # full transcript JSON string
 
-class EventLog(BaseModel):
+class LandingPrecheckLog(BaseModel):
     participant_id: str
-    events: str  # full events JSON string you're replacing each time
+    landing_precheck: str  # full events JSON string you're replacing each time
 
 class TranscriptLog(BaseModel):
     participant_id: str
@@ -61,8 +61,8 @@ def log_session(body: SessionLog):
         conn.commit()
     return {"message": "session logged"}
 
-@router.post("/log-landing")
-def long_landing(body: LandingLog):
+@router.post("/log-landing-question")
+def long_landing(body: LandingQuestionLog):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -72,26 +72,28 @@ def long_landing(body: LandingLog):
         conn.commit()
     return {"message": "events updated"}
 
-@router.post("/log-events")
-def log_events(body: EventLog):
+@router.post("/log-landing-precheck")
+def log_events(body: LandingPrecheckLog):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE {table_name} SET events = ? WHERE participant_id = ?",
-            body.events, body.participant_id
+            f"UPDATE {table_name} SET landing_precheck = ? WHERE participant_id = ?",
+            body.landing_precheck, body.participant_id
         )
         conn.commit()
     return {"message": "events updated"}
 
-@router.post("/log-transcript")
+@router.post("/log-main-interaction")
 def log_transcript(body: TranscriptLog):
+    print("in log main interaction")
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE {table_name} SET transcript = ? WHERE participant_id = ?",
+            f"UPDATE {table_name} SET main_interaction = ? WHERE participant_id = ?",
             body.transcript, body.participant_id
         )
         conn.commit()
+    print("updated main_interaction with transcript")
     return {"message": "transcript updated"}
 
 @router.post("/log-completion")
