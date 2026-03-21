@@ -169,7 +169,7 @@ else:
 # QUESTION BANK
 # ─────────────────────────────────────────────
 
-QUESTION_BANK = [
+QUESTION_BANK_LITERATURE = [
     "What are clinical trials?",
     "What is informed consent?",
     "What is an IRB?",
@@ -198,6 +198,47 @@ QUESTION_BANK = [
     "Will I be able to handle being in a clinical trial?",
     "What will my doctor gain from this clinical trial research?",
     "Is taking part in a clinical trial voluntary?",
+]
+
+QUESTION_BANK = [
+  "What are clinical trials?",
+  "What types of participants are typically involved in clinical trials?",
+  "How do I know if I am eligible to participate in a clinical trial?",
+  "What are some common risks associated with clinical trials?",
+  "How do clinical trials ensure participant safety?",
+  "What is informed consent in the context of clinical trials?",
+  "What are the costs associated with participating in a clinical trial?",
+  "Who typically pays for clinical trials?",
+  "How does randomization work in clinical trials?",
+  "What is the role of a principal investigator in a clinical trial?",
+  "What is the difference between treatment trials and prevention trials?",
+  "What are the common phases of clinical trials?",
+  "What happens if the treatment being studied turns out to be harmful?",
+  "How have virtual clinical trials changed the landscape of participation?",
+  "What measures are being taken to enhance diversity in clinical trials?",
+  "What is the significance of using placebos in clinical trials?",
+  "How do clinical trials affect the treatment options available for cancer patients?",
+  "What is telemedicine's role in modern clinical trials?",
+  "What kind of feedback can participants provide to researchers during trials?",
+  "How can the inclusion of older adults in clinical trials be improved?",
+  "What efforts are made to recruit participants from minority communities in clinical trials?",
+  "How does the study design impact patient recruitment in clinical trials?",
+  "What are the implications if a clinical trial terminates early?",
+  "Why might a study exclude participants with certain health conditions?",
+  "What is the importance of trial protocols in clinical research?",
+  "What role do community advocacy groups play in clinical trials?",
+  "How are clinical trial sites chosen for new studies?",
+  "What challenges do clinical trials face in recruiting participants?",
+  "How can technology improve patient participation in clinical trials?",
+  "What considerations are there regarding travel for clinical trial participants?",
+  "How is data collected during clinical trials?",
+  "What kind of support might be available for participants who incur costs related to trials?",
+  "What happens to participants after the clinical trial ends?",
+  "Why is informed consent important for clinical trial participants?",
+  "What unique barriers do racial and ethnic minorities face in clinical trials?",
+  "How do clinical trials contribute to cancer research and treatment advancements?",
+  "What does 'enrolling by invitation' mean in clinical trials?",
+  "How has the COVID-19 pandemic affected clinical trial operations?"
 ]
 
 # STORAGE_DIR = "rag_storage"
@@ -329,12 +370,13 @@ async def run_precheck(message: str) -> PrecheckResponse:
     # print("SIMILAR TOP SCORE ARE", top_score)
     # print("SIMILAR ARE", similar)
     system_prompt = f"""
-        You are evaluating whether a user's message is ready to be processed by a clinical trials assistant. You act like a friendly, conversational helper named Milo.
+        You act like a friendly, conversational helper named Jordan. You are evaluating whether a user's message is ready to be answered by Dr. Alex, a clinical trials assistant. 
+        Your task is to provide feedback on the user's current input.
 
-        Here is the complete list of questions Dr. Alex can answer well:
-        {QUESTION_BANK}
+        Here is a list of questions that Dr. Alex can answer:
+        {QUESTION_BANK + QUESTION_BANK_LITERATURE}
 
-        When providing suggestions, ONLY use questions EXACTLY as they appear in the list above.
+        When providing suggestions, use the questions from the list above as a guide to suggest relevant questions.
 
         Assess the user's message and respond ONLY in valid JSON matching this exact structure:
         {{
