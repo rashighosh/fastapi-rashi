@@ -1,0 +1,37 @@
+[
+  {
+    "file": "Glossary Terms _ ClinicalTrials.gov.pdf",
+    "source": "ClinicalTrials.gov",
+    "title": "Glossary Terms",
+    "type": "glossary",
+    "url": "https://clinicaltrials.gov/study-basics/glossary"
+  },
+  {
+    "file": "How to Read a Study Record _ ClinicalTrials.gov.pdf",
+    "source": "ClinicalTrials.gov",
+    "title": "How to Read a Study Record",
+    "type": "patient_education",
+    "url": "https://clinicaltrials.gov/study-basics/how-to-read-study-record"
+  },
+  {
+    "file": "How to Read Study Results _ ClinicalTrials.gov.pdf",
+    "source": "ClinicalTrials.gov",
+    "title": "How to Read Study Results",
+    "type": "patient_education",
+    "url": "https://clinicaltrials.gov/study-basics/how-to-read-study-results"
+  },
+  {
+    "file": "Learn About Studies _ ClinicalTrials.gov.pdf",
+    "source": "ClinicalTrials.gov",
+    "title": "Learn About Studies",
+    "type": "patient_education",
+    "url": "https://clinicaltrials.gov/study-basics/learn-about-studies"
+  },
+  {
+    "file": "Patient Resources _ ClinicalTrials.gov.pdf",
+    "source": "ClinicalTrials.gov",
+    "title": "Patient Resources",
+    "type": "patient_education",
+    "url": "https://clinicaltrials.gov/study-basics/patient-resources"
+  }
+]
