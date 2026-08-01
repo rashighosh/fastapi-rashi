@@ -7,7 +7,7 @@ from qualtrics import (
     generate_goals_from_scores,
     generate_more_goals_from_scores,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 import uvicorn
 from openai import AsyncOpenAI
@@ -32,13 +32,14 @@ import glob
 import io, wave, struct
 import soundfile as sf
 from mangum import Mangum
+from enum import Enum
 
 load_dotenv()
 
 useCORS = True
 
 # Endpoints allowed to access this server
-origins = ["https://main.d355vauwiio7nq.amplifyapp.com", "http://localhost:5173"]
+origins = ["https://main.d355vauwiio7nq.amplifyapp.com", "https://idea.d355vauwiio7nq.amplifyapp.com", "http://localhost:5173", "https://ufl.qualtrics.com"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu/v1"
@@ -55,6 +56,12 @@ UF_LOCAL_MODEL = 'gpt-oss-120b'
 client_rag = openai.OpenAI(
     api_key=RASHI_LITELLM_KEY,
     base_url=base_url
+)
+
+# Regular LiteLLM client for conversational responses (async)
+client_chat = AsyncOpenAI(
+    api_key= RASHI_LITELLM_KEY,
+    base_url= base_url # LiteLLM Proxy is OpenAI compatible, Read More: https://docs.litellm.ai/docs/proxy/user_keys
 )
 
 def getUser(id: str):
@@ -100,6 +107,55 @@ def clean_pdf_text(text: str) -> str:
 
     return text.strip()
 
+def read_pdf_pages(path: str) -> List[Dict]:
+    reader = PdfReader(path)
+    pages = []
+
+    for page_index, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        text = clean_pdf_text(text)
+
+        if text.strip():
+            pages.append({
+                "page_number": page_index + 1,
+                "text": text,
+            })
+
+    return pages
+
+def chunk_pages(
+    pages: List[Dict],
+    chunk_size: int = 1200,
+    overlap: int = 200
+) -> List[Dict]:
+    chunks = []
+
+    for page in pages:
+        page_number = page["page_number"]
+        text = re.sub(r"\s+", " ", page["text"]).strip()
+
+        start = 0
+
+        while start < len(text):
+            end = min(len(text), start + chunk_size)
+
+            sentence_end = text.rfind(".", start, end)
+            if sentence_end != -1 and sentence_end > start + 300:
+                end = sentence_end + 1
+
+            chunk = text[start:end].strip()
+
+            if len(chunk.split()) >= 20:
+                chunks.append({
+                    "text": chunk,
+                    "page_number": page_number,
+                    "char_start": start,
+                    "char_end": end,
+                })
+
+            start = max(end - overlap, start + 1)
+
+    return chunks
 
 def read_pdf_text(path: str) -> str:
     reader = PdfReader(path)
@@ -156,6 +212,37 @@ def load_source_manifests(docs_folder="./docs") -> Dict[str, Dict]:
 
     return manifest_by_file
 
+def build_resource_cards(results, max_cards=3):
+    cards = []
+    seen_files = set()
+
+    for i, res in enumerate(results):
+        meta = res["meta"]
+        file_key = meta.get("file") or meta.get("title") or f"source-{i}"
+
+        if file_key in seen_files:
+            continue
+
+        seen_files.add(file_key)
+
+        cards.append({
+            "id": i,
+            "source": meta.get("source", "Trusted source"),
+            "title": meta.get("title") or meta.get("file") or "Trusted resource",
+            "file": meta.get("file"),
+            "type": meta.get("type", "unknown"),
+            "url": meta.get("url", ""),
+            "page_number": meta.get("page_number"),
+            "chunk_id": meta.get("chunk_id"),
+            "excerpt": res["text"][:500],
+            "score": res["score"],
+        })
+
+        if len(cards) == max_cards:
+            break
+
+    return cards
+
 class LocalRAG:
     def __init__(self):
         self.index = None
@@ -180,18 +267,21 @@ class LocalRAG:
 
             print(f"📄 Processing {file_name} from source: {info.get('source', source_label)}")
 
-            raw = read_pdf_text(path)
-            chunks = chunk_text(raw)
+            pages = read_pdf_pages(path)
+            chunks = chunk_pages(pages)
 
-            for j, c in enumerate(chunks):
-                all_chunks.append(c)
+            for j, chunk in enumerate(chunks):
+                all_chunks.append(chunk["text"])
                 all_meta.append({
                     "source": info.get("source", source_label),
                     "file": file_name,
                     "title": info.get("title", file_name),
                     "type": info.get("type", "unknown"),
                     "url": info.get("url", ""),
-                    "chunk_id": j
+                    "chunk_id": j,
+                    "page_number": chunk["page_number"],
+                    "char_start": chunk["char_start"],
+                    "char_end": chunk["char_end"],
                 })
 
         if not all_chunks:
@@ -397,15 +487,6 @@ class RAGResponseOld(BaseModel):
     citations: List[SourceSnippetOld] # List of specific snippets used
     confidence: float # 0.0 to 1.0
 
-class SourceExplanation(BaseModel):
-    id: int
-    relevance_explanation: str
-
-class RAGResponse(BaseModel):
-    answer: str
-    source_explanations: List[SourceExplanation]
-    confidence: float
-
 class SimilarQuestionsRequest(BaseModel):
     message: str
     top_n: int = 3
@@ -462,11 +543,178 @@ class RAGResponse(BaseModel):
     confidence: float
     talking_points: list[str] = Field(default_factory=list)
 
-# Regular LiteLLM client for conversational responses (async)
-client_chat = AsyncOpenAI(
-    api_key= RASHI_LITELLM_KEY,
-    base_url= base_url # LiteLLM Proxy is OpenAI compatible, Read More: https://docs.litellm.ai/docs/proxy/user_keys
-)
+class JordanThemeDetail(BaseModel):
+    id: str
+    text: str
+    source_question: str = ""
+    source_answer: str = ""
+
+    @field_validator(
+        "source_question",
+        "source_answer",
+        mode="before",
+    )
+    @classmethod
+    def replace_null_with_empty_string(cls, value):
+        return value if isinstance(value, str) else ""
+
+class JordanTheme(BaseModel):
+    id: str
+    label: str
+    summary: str
+    details: List[JordanThemeDetail] = Field(default_factory=list)
+
+
+class JordanConnection(BaseModel):
+    # Theme the newest idea was added to.
+    theme_id: str
+
+    # Earlier detail that the newest idea meaningfully connects to.
+    earlier_detail_id: str
+
+    # Short text for internal logging or an optional compact UI cue.
+    label: str
+
+    # User-facing explanation of the relationship.
+    text: str
+
+    # Natural reminder of what the user asked earlier.
+    earlier_question_reference: str
+
+
+class JordanConversationModelData(BaseModel):
+    themes: List[JordanTheme] = Field(default_factory=list)
+    latestConnection: JordanConnection | None = None
+
+
+class JordanTurnUpdateRequest(BaseModel):
+    user_question: str
+    alex_answer: str
+    history: List[ChatTurn] = Field(default_factory=list)
+    current_model: JordanConversationModelData
+
+    previous_guidance_types: List[
+        Literal[
+            "make_more_specific",
+            "different_perspective",
+            "related_idea",
+        ]
+    ] = Field(default_factory=list)
+
+    previous_guidance_messages: List[str] = Field(default_factory=list)
+
+
+class JordanTurnUpdateResponse(BaseModel):
+    # The complete updated theme collection replaces frontend memory.
+    themes: List[JordanTheme]
+
+    # Present only when the latest idea meaningfully builds on an earlier one.
+    latest_connection: JordanConnection | None = None
+
+    guidance_type: Literal[
+        "make_more_specific",
+        "different_perspective",
+        "related_idea",
+    ]
+
+    # The only text Jordan speaks and the primary text shown to the user.
+    jordan_message: str
+
+class QueryPreprocess(BaseModel):
+    route: Literal[
+        "clinical_trials_education",
+        "personal_medical_advice",
+        "trial_recommendation_or_eligibility",
+        "political_or_policy",
+        "unrelated",
+    ]
+    search_query: str
+
+class AlexAnswerScope(str, Enum):
+    GENERAL_ANSWER = "general_answer"
+    VARIES_BY_TRIAL = "varies_by_trial"
+    PERSONALIZED_DECISION = "personalized_decision"
+    INSUFFICIENT_CONTEXT = "insufficient_context"
+
+
+class RAGResponseV2(BaseModel):
+    answer: str
+
+    # Reuse your existing SourceExplanation model:
+    # class SourceExplanation(BaseModel):
+    #     id: int
+    #     relevance_explanation: str
+    source_explanations: List[SourceExplanation] = Field(
+        default_factory=list
+    )
+
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+    )
+
+    talking_points: List[str] = Field(
+        default_factory=list,
+        max_length=3,
+    )
+
+    answer_scope: AlexAnswerScope
+
+
+class JordanDecisionTurnUpdateRequest(BaseModel):
+    user_question: str
+    alex_answer: str
+    alex_answer_scope: AlexAnswerScope
+
+    # Your existing history model is ChatTurn.
+    history: List[ChatTurn] = Field(
+        default_factory=list
+    )
+
+    # Your existing workspace model has this exact name.
+    current_model: JordanConversationModelData
+
+    previous_guidance_types: List[
+        Literal[
+            "make_more_specific",
+            "different_perspective",
+            "related_idea",
+        ]
+    ] = Field(default_factory=list)
+
+    previous_guidance_messages: List[str] = Field(
+        default_factory=list
+    )
+
+def next_jordan_theme_id(themes: List[JordanTheme]) -> str:
+    highest_number = 0
+
+    for theme in themes:
+        match = re.fullmatch(r"theme-(\d+)", theme.id)
+
+        if match:
+            highest_number = max(
+                highest_number,
+                int(match.group(1)),
+            )
+
+    return f"theme-{highest_number + 1}"
+
+
+def next_jordan_detail_id(themes: List[JordanTheme]) -> str:
+    highest_number = 0
+
+    for theme in themes:
+        for detail in theme.details:
+            match = re.fullmatch(r"detail-(\d+)", detail.id)
+
+            if match:
+                highest_number = max(
+                    highest_number,
+                    int(match.group(1)),
+                )
+
+    return f"detail-{highest_number + 1}"
 
 @app.get("/debug")
 async def debug():
@@ -643,194 +891,420 @@ def encode_pcm_to_mp3(pcm_data, samplerate: int) -> bytes:
 def normalize_word(word: str):
     return re.sub(r"[^a-z0-9']", "", word.lower())
 
+def prepare_text_for_speech(text: str) -> str:
+    text = text.strip()
+
+    # Normalize Unicode punctuation.
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("–", "-")
+        .replace("—", ", ")
+        .replace("…", "...")
+        .replace("\u00a0", " ")
+    )
+
+    # Make common source names easier to speak and transcribe.
+    replacements = {
+        r"\bNCI\b": "National Cancer Institute",
+        r"\bNIH\b": "National Institutes of Health",
+        r"\bFDA\b": "F D A",
+        r"\bIRB\b": "I R B",
+        r"ClinicalTrials\.gov": "Clinical Trials dot gov",
+        r"&": " and ",
+    }
+
+    for pattern, replacement in replacements.items():
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+    # Remove formatting that should not be spoken.
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[*_#`•]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+def create_fallback_timestamps(
+    text: str,
+    duration: float,
+) -> list[dict]:
+    words = [
+        word
+        for word in text.split()
+        if normalize_word(word)
+    ]
+
+    if not words or duration <= 0:
+        return []
+
+    step = duration / len(words)
+
+    return [
+        {
+            "word": word,
+            "start": index * step,
+            "end": min((index + 1) * step, duration),
+        }
+        for index, word in enumerate(words)
+    ]
+
+def sanitize_timestamps(timestamps: list[dict], duration: float) -> list[dict]:
+    cleaned = []
+    last_end = 0.0
+
+    for entry in timestamps:
+        start, end = entry["start"], entry["end"]
+
+        # Reject anything beyond the actual audio length
+        if start > duration or end > duration + 0.1:
+            continue
+
+        # Reject anything that goes backward or overlaps badly with the last accepted word
+        if start < last_end - 0.05:
+            continue
+
+        # Reject exact-duplicate consecutive words with near-zero gap (hallucination pattern)
+        if cleaned and normalize_word(entry["word"]) == normalize_word(cleaned[-1]["word"]):
+            if start - cleaned[-1]["end"] < 0.05:
+                continue
+
+        cleaned.append(entry)
+        last_end = end
+
+    if len(cleaned) < 0.6 * len(timestamps):
+        return []
+
+    return cleaned
 
 @app.post("/tts")
 async def tts(request: TTSRequest):
-    sentences = [request.text.strip()]
+    spoken_text = prepare_text_for_speech(request.text)
+
+    if not spoken_text:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid text to synthesize",
+        )
+
     character = request.character
 
-    characterVoice = "af_heart"
-    voiceSpeed = 1.0
+    character_voice = "af_heart"
+    voice_speed = 1.2
 
     if character == "companion":
-        characterVoice = "am_echo"
-        voiceSpeed = 1.2
+        character_voice = "am_echo"
+        voice_speed = 1.2
 
-    all_words = []
-    all_pcm = []
-    samplerate = None
-    time_offset = 0.0
+    print(
+        "[TTS INPUT]",
+        {
+            "original_text": request.text,
+            "spoken_text": spoken_text,
+            "character": character,
+        },
+    )
 
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
+    # Generate the audio.
+    res = await client_chat.audio.speech.create(
+        model="kokoro",
+        voice=character_voice,
+        input=spoken_text,
+        speed=voice_speed,
+    )
 
-        res = await client_chat.audio.speech.create(
-            model="kokoro",
-            voice=characterVoice,
-            input=sentence,
-            speed=voiceSpeed,
+    audio_bytes = res.content
+
+    # Decode audio so we know its real duration.
+    audio_buffer = io.BytesIO(audio_bytes)
+    pcm, samplerate = sf.read(
+        audio_buffer,
+        dtype="int16",
+    )
+
+    if samplerate is None or len(pcm) == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="TTS returned empty audio",
         )
 
-        buf = io.BytesIO(res.content)
-        pcm, sr = sf.read(buf, dtype="int16")
+    duration = len(pcm) / samplerate
 
-        if samplerate is None:
-            samplerate = sr
+    # Send the generated audio to Whisper.
+    whisper_buffer = io.BytesIO(audio_bytes)
+    whisper_buffer.name = "audio.mp3"
 
-        all_pcm.append(pcm)
+    transcript = await client_chat.audio.transcriptions.create(
+        model="whisper-large-v3",
+        file=whisper_buffer,
+        response_format="verbose_json",
+        timestamp_granularities=["word"],
+        prompt=spoken_text,
+        temperature=0,
+    )
 
-        duration = len(pcm) / sr
+    timestamps = []
 
-        expected_words = [
-            normalize_word(w)
-            for w in sentence.split()
-            if normalize_word(w)
-        ]
-        expected_set = set(expected_words)
+    transcript_data = transcript.model_dump()
 
-        whisper_buf = io.BytesIO(res.content)
-        whisper_buf.name = "audio.mp3"
+    for segment in transcript_data.get("segments", []):
+        for word_data in segment.get("words", []):
+            word = word_data.get("word", "").strip()
+            clean_word = normalize_word(word)
 
-        transcript = await client_chat.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=whisper_buf,
-            response_format="verbose_json",
-            timestamp_granularities=["word"],
-            prompt=sentence,
-            temperature=0,
-        )
+            start = word_data.get("start")
+            end = word_data.get("end")
 
-        for segment in transcript.model_dump().get("segments", []):
-            for word in segment.get("words", []):
-                clean_word = normalize_word(word.get("word", ""))
-                start = word.get("start")
-                end = word.get("end")
+            if not clean_word:
+                continue
 
-                if start is None or end is None:
-                    continue
+            if start is None or end is None:
+                continue
 
-                word_duration = end - start
+            word_duration = end - start
 
-                # Drop Whisper hallucinations like "thank you for watching"
-                if clean_word not in expected_set:
-                    continue
+            # Reject only clearly invalid timestamps.
+            if word_duration <= 0.01:
+                continue
 
-                # Drop weird long fake words/timestamps
-                if word_duration <= 0.01 or word_duration > 1.2:
-                    continue
+            if word_duration > 2.0:
+                continue
 
-                all_words.append({
-                    "word": word["word"],
-                    "start": start + time_offset,
-                    "end": end + time_offset,
-                })
+            timestamps.append({
+                "word": word,
+                "start": float(start),
+                "end": float(end),
+            })
 
-        time_offset += duration
+    expected_word_count = len([
+        word
+        for word in spoken_text.split()
+        if normalize_word(word)
+    ])
 
-    if not all_pcm:
-        raise HTTPException(status_code=400, detail="No valid text to synthesize")
+    timestamps = sanitize_timestamps(timestamps, duration)
 
-    combined_pcm = np.concatenate(all_pcm, axis=0)
+    timestamp_coverage = (
+        len(timestamps) / expected_word_count
+        if expected_word_count > 0
+        else 0
+    )
 
-    out = io.BytesIO()
-    sf.write(out, combined_pcm, samplerate, format="mp3")
-    combined_audio = out.getvalue()
+    print(
+        "[TTS TIMESTAMP DEBUG]",
+        {
+            "audio_duration": round(duration, 2),
+            "expected_words": expected_word_count,
+            "timestamp_words": len(timestamps),
+            "coverage": round(timestamp_coverage, 2),
+            "whisper_text": transcript_data.get("text", ""),
+        },
+    )
+
+    # Always use the original spoken text for subtitle words.
+    # Whisper can mishear numbers such as Phase 1, Phase 2, and Phase 3.
+    timestamps = create_fallback_timestamps(
+        spoken_text,
+        duration,
+    )
 
     return {
-        "audio": base64.b64encode(combined_audio).decode("utf-8"),
-        "timestamps": all_words,
+        "audio": base64.b64encode(
+            audio_bytes,
+        ).decode("utf-8"),
+        "timestamps": timestamps,
     }
-    
-def readable_source_name(source):
-    source_map = {
-        "NCI": "the National Cancer Institute",
-        "FDA": "the FDA",
-        "NIH": "the NIH",
-        "ClinicalTrials.gov": "ClinicalTrials.gov",
-    }
-    return source_map.get(source, source)
+  
+async def preprocess_question(question, history):
+    print("***IN PREPROCESS QUESTION")
+    recent_history = history[-4:] if history else []
 
+    prompt = f"""
+        You are helping prepare search queries for a clinical trials education assistant.
 
-def starts_with_source_cue(answer: str):
-    lowered = answer.strip().lower()
-    return lowered.startswith((
-        "according to",
-        "based on",
-        "the fda",
-        "the national cancer institute",
-        "clinicaltrials.gov",
-        "from what i found",
-    ))
+        Your tasks:
+        1. Classify the user's latest message into ONE route:
+        - clinical_trials_education
+        - personal_medical_advice
+        - trial_recommendation_or_eligibility
+        - political_or_policy
+        - unrelated
 
+        2. If the route is clinical_trials_education, rewrite the user's latest message into a concise standalone search query optimized for retrieving clinical trial education documents.
 
-def add_spoken_source_cue(answer: str, sources: list, confidence: float):
-    if not answer or not sources:
-        return answer
+        Rules:
+        - Preserve the user's intent.
+        - Do NOT answer the question.
+        - Do NOT invent details.
+        - Include relevant clinical trial terminology when appropriate.
+        - If the route is NOT clinical_trials_education, simply copy the original question as the search_query.
 
-    if confidence is not None and confidence < 0.35:
-        return answer
+        Recent conversation:
+        {recent_history}
 
-    lowered = answer.lower()
-    no_answer_phrases = [
-        "i do not have enough information",
-        "i don't have enough information",
-        "the context does not contain",
-        "i could not find",
-        "i can’t find",
-        "i can't find",
-    ]
+        Latest message:
+        {question}
+        """
 
-    if any(phrase in lowered for phrase in no_answer_phrases):
-        return answer
-
-    if starts_with_source_cue(answer):
-        return answer
-
-    source_names = []
-    for source in sources[:2]:
-        name = readable_source_name(source.get("source", ""))
-        if name and name not in source_names:
-            source_names.append(name)
-
-    if not source_names:
-        return answer
-
-    if len(source_names) == 1:
-        templates = [
-            "According to {s1}, {answer}",
-            "Based on what I found from {s1}, {answer}",
-            "{s1} explains that {answer}",
-            "From {s1}, the key idea is this: {answer}",
-        ]
-    else:
-        templates = [
-            "According to {s1} and {s2}, {answer}",
-            "Based on what I found from {s1} and {s2}, {answer}",
-            "{s1} and {s2} explain that {answer}",
-            "From {s1} and {s2}, the key idea is this: {answer}",
-        ]
-
-    template = random.choice(templates)
-
-    # Lowercase first character so it reads smoothly after the cue.
-    cleaned_answer = answer.strip()
-    cleaned_answer = cleaned_answer[0].lower() + cleaned_answer[1:]
-
-    return template.format(
-        s1=source_names[0],
-        s2=source_names[1] if len(source_names) > 1 else "",
-        answer=cleaned_answer,
+    response = await client_chat.beta.chat.completions.parse(
+        model=UF_LOCAL_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format=QueryPreprocess,
     )
-    
+
+    print("***PREPROCESS RETURNED", response.choices[0].message.parsed)
+
+    return response.choices[0].message.parsed
+
+def clean_alex_answer(text: str) -> str:
+    text = text.strip()
+
+    # Convert clinical trial phase Roman numerals to regular numbers.
+    phase_replacements = {
+        r"\bPhase\s+IV\b": "Phase 4",
+        r"\bPhase\s+III\b": "Phase 3",
+        r"\bPhase\s+II\b": "Phase 2",
+        r"\bPhase\s+I\b": "Phase 1",
+    }
+
+    for pattern, replacement in phase_replacements.items():
+        text = re.sub(
+            pattern,
+            replacement,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    # Remove bullet or numbered-list markers.
+    text = re.sub(
+        r"(?:^|\n)\s*(?:[-*•▪◦]+|\d+[.)])\s*",
+        " ",
+        text,
+    )
+
+    # Turn all remaining line breaks into one conversational paragraph.
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
 @app.post("/rag-chat")
 async def rag_chat(request: ChatRequestHistory):
-    print("IN RAG CHAT")
+    print("***IN RAG CHAT")
     question = request.message
+
+    preprocess = await preprocess_question(question, request.history)
+    print("***THIS IS PREPROCESS IN RAG CHAT", preprocess)
+    print(type(preprocess))
+    print(preprocess.route)
+    print(preprocess.search_query)
+
+    if preprocess.route != "clinical_trials_education":
+        print("PREPROCESS ROUTE IS NOT CLINICAL TRIAL EDUCATION RELATED", preprocess)
+
+        # route_responses = {
+        #     "personal_medical_advice": {
+        #         "answer": (
+        #             "I can’t give medical advice or tell you what treatment is best for you. "
+        #             "That depends on your health and should be discussed with your cancer care team. "
+        #             "Jordan can help you save this as a question to ask your doctor."
+        #         ),
+        #         "talking_points": [
+        #             "Ask your care team",
+        #             "Save this question",
+        #             "Discuss your options",
+        #         ],
+        #         "sources": [
+        #             {
+        #                 "id": 0,
+        #                 "source": "NCI",
+        #                 "title": "Questions to Ask Your Doctor About Treatment",
+        #                 "type": "support_resource",
+        #                 "url": "https://www.cancer.gov/about-cancer/coping/questions",
+        #                 "file": None,
+        #                 "chunk_id": None,
+        #                 "score": 1.0,
+        #                 "content": "A guide to help patients prepare questions for their cancer care team.",
+        #                 "relevance_explanation": "This can help you prepare questions for your doctor instead of making treatment decisions here.",
+        #             }
+        #         ],
+        #     },
+        #     "trial_recommendation_or_eligibility": {
+        #         "answer": (
+        #             "I can’t tell you if a specific clinical trial is right for you or if you qualify. "
+        #             "Eligibility depends on many personal health details. "
+        #             "Jordan can help you prepare questions about what doctors look at."
+        #         ),
+        #         "talking_points": [
+        #             "Eligibility depends on health",
+        #             "Ask what doctors check",
+        #             "Prepare trial questions",
+        #         ],
+        #         "sources": [
+        #             {
+        #                 "id": 0,
+        #                 "source": "NCI",
+        #                 "title": "Questions to Ask Your Doctor About Treatment",
+        #                 "type": "support_resource",
+        #                 "url": "https://www.cancer.gov/about-cancer/coping/questions",
+        #                 "file": None,
+        #                 "chunk_id": None,
+        #                 "score": 1.0,
+        #                 "content": "A guide to help patients prepare questions for their cancer care team.",
+        #                 "relevance_explanation": "This can help you prepare questions for your doctor instead of making treatment decisions here.",
+        #             }
+        #         ],
+        #     },
+        #     "political_or_policy": {
+        #         "answer": (
+        #             "I’m here to help explain clinical trials, not discuss political opinions or policy debates. "
+        #             "Jordan can help you learn about participant protections, like informed consent, IRBs, and safety rules."
+        #         ),
+        #         "talking_points": [
+        #             "Stay focused on trials",
+        #             "Learn participant protections",
+        #             "Ask about safety rules",
+        #         ],
+        #         "sources": [
+        #             {
+        #                 "id": 0,
+        #                 "source": "HHS",
+        #                 "title": "About Research Participation",
+        #                 "type": "support_resource",
+        #                 "url": "https://www.hhs.gov/ohrp/education-and-outreach/about-research-participation/index.html",
+        #                 "file": None,
+        #                 "chunk_id": None,
+        #                 "score": 1.0,
+        #                 "content": "Information about research participation, rights, consent, and protections.",
+        #                 "relevance_explanation": "This helps redirect policy questions toward participant rights and safety protections.",
+        #             }
+        #         ],
+        #     },
+        #     "unrelated": {
+        #         "answer": (
+        #             "I’m here to help with questions about clinical trials. "
+        #             "Jordan can help bring us back to your goals and suggest a question you may want to ask next."
+        #         ),
+        #         "talking_points": [
+        #             "Return to your goals",
+        #             "Ask about trials",
+        #             "Jordan can suggest questions",
+        #         ],
+        #     },
+        # }
+
+        # fallback = route_responses.get(preprocess.route, route_responses["unrelated"])
+
+        # return {
+        #     "answer": fallback["answer"],
+        #     "sources": [],
+        #     "confidence": 1.0,
+        #     "talking_points": fallback["talking_points"],
+        # }
+    
     
     # 1. Get RAG results
-    results = rag.retrieve(question, k=5)
+    results = rag.retrieve(preprocess.search_query, k=8)
     
     # 2. Format the "Raw Material" for the LLM
     # We include IDs so the LLM can easily distinguish chunks
@@ -856,9 +1330,12 @@ async def rag_chat(request: ChatRequestHistory):
     Do not use conversation history as evidence or as a source of facts.
 
     Answer the user's current question using ONLY the provided context.
-    If the context does not contain the answer, clearly say you do not have enough information to answer.
 
-    Write for someone with limited health literacy:
+    If the context does not contain the answer:
+    - Clearly say the sources you have access to doesn't have enough information to answer.
+    - Do NOT say "the sources you gave"; always refer to the sources as "the sources I have" or something along those lines
+
+    Write using plain language:
     - Aim for about a 5th–6th grade reading level.
     - Use simple, everyday words.
     - Keep sentences short.
@@ -870,6 +1347,16 @@ async def rag_chat(request: ChatRequestHistory):
     - Focus on the most important information.
     - Do not overwhelm the user with unnecessary details.
     - Speak directly to the user in a conversational tone.
+
+    Answer format:
+    - Write the answer as one conversational paragraph.
+    - Do not use bullet points, numbered lists, headings, or line breaks.
+    - Do not begin sentences with symbols such as "-", "*", or "•".
+    - The answer should sound natural when spoken aloud.
+
+    Numbers and trial phases:
+    - Write clinical trial phases using regular numbers: Phase 1, Phase 2, Phase 3, and Phase 4.
+    - Never write phase numbers as Roman numerals such as Phase I, Phase II, Phase III, or Phase IV.
 
     Also return talking_points:
     - Max 3 bullets.
@@ -916,8 +1403,11 @@ async def rag_chat(request: ChatRequestHistory):
     CONTEXT:
     {context_str}
 
-    CURRENT QUESTION:
+    CURRENT USER'S ORIGINAL QUESTION:
     {question}
+
+    Search query used for retrieval:
+    {preprocess.search_query}
     """
     })
 
@@ -933,44 +1423,927 @@ async def rag_chat(request: ChatRequestHistory):
 
     parsed = response.choices[0].message.parsed
 
-    explanation_by_id = {
-        item.id: item.relevance_explanation
-        for item in parsed.source_explanations
-    }
-
-    sources = []
-
-    for i, res in enumerate(results):
-        if i not in explanation_by_id:
-            continue
-
-        meta = res["meta"]
-
-        sources.append({
-            "id": i,
-            "source": meta.get("source"),
-            "title": meta.get("title", meta.get("file")),
-            "type": meta.get("type"),
-            "url": meta.get("url", ""),
-            "file": meta.get("file"),
-            "chunk_id": meta.get("chunk_id"),
-            "score": res["score"],
-            "content": res["text"][:500],
-            "relevance_explanation": explanation_by_id[i],
-        })
-
-    answer_with_source_cue = add_spoken_source_cue(
-        parsed.answer,
-        sources,
-        parsed.confidence,
-    )
+    sources = build_resource_cards(results)
 
     return {
-        "answer": answer_with_source_cue,
+        "answer": clean_alex_answer(parsed.answer),
         "sources": sources,
         "confidence": parsed.confidence,
         "talking_points": parsed.talking_points or [],
     }
+
+@app.post("/rag-chat-v2")
+async def rag_chat_v2(
+    request: ChatRequestHistory,
+):
+    print("*** IN RAG CHAT V2")
+
+    question = request.message
+
+    preprocess = await preprocess_question(
+        question,
+        request.history,
+    )
+
+    print("*** RAG V2 PREPROCESS:", preprocess)
+    print("*** RAG V2 ROUTE:", preprocess.route)
+    print("*** RAG V2 SEARCH QUERY:", preprocess.search_query)
+
+    # Retrieve educational source material.
+    results = rag.retrieve(
+        preprocess.search_query,
+        k=8,
+    )
+
+    context_list = []
+
+    for i, res in enumerate(results):
+        meta = res["meta"]
+
+        context_list.append(
+            f"""
+ID: {i}
+SOURCE: {meta.get("source", "")}
+TITLE: {meta.get("title", meta.get("file", ""))}
+TYPE: {meta.get("type", "")}
+FILE: {meta.get("file", "")}
+URL: {meta.get("url", "")}
+CONTENT: {res["text"]}
+""".strip()
+        )
+
+    context_str = "\n\n---\n\n".join(context_list)
+
+    system_prompt = """
+You are Alex, a clinical trials educator.
+
+Use conversation history only to understand what the user means.
+Use ONLY the provided context as factual evidence.
+
+Answer the user's current question in plain, conversational language.
+When the concern behind the question is clear, respond to that concern while staying within the provided facts.
+
+If there is no single general answer or the context cannot answer the question exactly:
+- Do not stop at saying the sources lack the answer.
+- Briefly explain why the answer varies or remains unknown.
+- Give any useful general information supported by the context.
+- Name 2–3 things that would need to be checked for a specific trial.
+
+Do not ask for personal health information.
+Do not recommend a trial, judge eligibility, choose a treatment, or give medical advice.
+
+Choose one answer_scope:
+- general_answer: the context directly answers the general question;
+- varies_by_trial: the general idea is known, but details depend on the specific trial;
+- personalized_decision: the user asks what is best or appropriate for them;
+- insufficient_context: the context provides almost no useful information.
+
+Use simple words and short sentences.
+Explain medical terms in plain language.
+Be friendly, direct, and reassuring.
+
+Write one conversational paragraph under 90 words.
+Do not use headings, lists, citations, source names, or line breaks.
+Write phases as Phase 1, Phase 2, Phase 3, and Phase 4.
+
+Return:
+1. answer
+2. source_explanations
+3. confidence
+4. talking_points
+5. answer_scope
+
+For talking_points:
+- Return at most 3.
+- Each should be 4–9 words.
+- Use plain language.
+- Keep them in the same order as the answer.
+- Do not include citations or source names.
+- Return an empty list only when no useful supported information can be given.
+
+For each source_explanation:
+- Use the exact source ID in the id field.
+- Explain why it helped in relevance_explanation.
+- Include only sources that directly support the answer.
+
+Do not invent source IDs.
+"""
+
+    chat_messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    ]
+
+    for turn in request.history[-20:]:
+        chat_messages.append(
+            {
+                "role": turn.role,
+                "content": turn.content,
+            }
+        )
+
+    chat_messages.append(
+        {
+            "role": "user",
+            "content": f"""
+CONTEXT:
+{context_str}
+
+CURRENT USER QUESTION:
+{question}
+
+PREPROCESS ROUTE:
+{preprocess.route}
+
+SEARCH QUERY:
+{preprocess.search_query}
+""".strip(),
+        }
+    )
+
+    try:
+        response = await client_chat.beta.chat.completions.parse(
+            model=UF_LOCAL_MODEL,
+            messages=chat_messages,
+            temperature=0,
+            response_format=RAGResponseV2,
+        )
+
+        parsed = response.choices[0].message.parsed
+
+        if parsed is None:
+            raw_content = response.choices[0].message.content
+
+            print(
+                "*** RAG CHAT V2 PARSE FAILED:",
+                raw_content,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to parse Alex response",
+            )
+
+        print("*** RAG CHAT V2 RESPONSE:", parsed)
+
+        sources = build_resource_cards(results)
+
+        return {
+            "answer": clean_alex_answer(parsed.answer),
+            "sources": sources,
+            "confidence": parsed.confidence,
+            "talking_points": parsed.talking_points or [],
+            "answer_scope": parsed.answer_scope.value,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            "*** RAG CHAT V2 ERROR:",
+            repr(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate Alex response",
+        )
+
+def validate_jordan_turn_update_v2(
+    *,
+    parsed: JordanTurnUpdateResponse,
+    request: JordanDecisionTurnUpdateRequest,
+    new_theme_id: str,
+    new_detail_id: str,
+) -> None:
+    existing_theme_ids = {theme.id for theme in request.current_model.themes}
+    existing_theme_lookup = {theme.id: theme for theme in request.current_model.themes}
+
+    existing_detail_ids = {
+        detail.id
+        for theme in request.current_model.themes
+        for detail in theme.details
+    }
+    existing_detail_lookup = {
+        detail.id: (theme.id, detail)
+        for theme in request.current_model.themes
+        for detail in theme.details
+    }
+
+    returned_theme_ids = {theme.id for theme in parsed.themes}
+
+    # --- Repair: re-attach any existing themes the model dropped ---
+    missing_theme_ids = existing_theme_ids - returned_theme_ids
+    for missing_id in missing_theme_ids:
+        print("*** JORDAN V2 REPAIR: re-adding dropped theme", missing_id)
+        parsed.themes.append(existing_theme_lookup[missing_id])
+
+    # --- Repair: re-attach any existing details the model dropped ---
+    returned_detail_ids = {
+        detail.id for theme in parsed.themes for detail in theme.details
+    }
+    missing_detail_ids = existing_detail_ids - returned_detail_ids
+    for missing_id in missing_detail_ids:
+        print("*** JORDAN V2 REPAIR: re-adding dropped detail", missing_id)
+        theme_id, detail = existing_detail_lookup[missing_id]
+        target_theme = next(
+            (t for t in parsed.themes if t.id == theme_id), None
+        )
+        if target_theme is not None:
+            target_theme.details.append(detail)
+        else:
+            # Theme itself vanished and wasn't in existing_theme_ids repair
+            # (shouldn't normally happen) — fall back to original theme.
+            parsed.themes.append(existing_theme_lookup.get(theme_id) or None)
+
+    # --- Fix placeholder / empty labels instead of failing the turn ---
+    for theme in parsed.themes:
+        if not theme.label or theme.label.strip().lower() in {
+            "new theme", "untitled", "theme"
+        }:
+            # Derive a fallback label from the first detail's text.
+            fallback_source = theme.details[0].text if theme.details else theme.summary
+            fallback_label = (fallback_source or "General concern")[:40].strip()
+            print(
+                "*** JORDAN V2 REPAIR: replacing placeholder label",
+                {"theme_id": theme.id, "was": theme.label, "now": fallback_label},
+            )
+            theme.label = fallback_label
+
+        if not theme.summary or not theme.summary.strip():
+            theme.summary = (
+                theme.details[0].text[:100] if theme.details else "Ideas related to this concern."
+            )
+
+    # --- Enforce the new detail was actually created; try to recover ---
+    all_returned_details = [d for t in parsed.themes for d in t.details]
+    new_details = [d for d in all_returned_details if d.id == new_detail_id]
+
+    if len(new_details) == 0:
+        # Model may have used a wrong/duplicate id for the "new" detail.
+        # Find a detail whose id isn't in existing_detail_ids at all —
+        # treat it as the intended new detail and relabel it.
+        unknown_details = [
+            d for d in all_returned_details if d.id not in existing_detail_ids
+        ]
+        if len(unknown_details) == 1:
+            print(
+                "*** JORDAN V2 REPAIR: relabeling stray new detail id",
+                {"was": unknown_details[0].id, "now": new_detail_id},
+            )
+            unknown_details[0].id = new_detail_id
+            new_details = unknown_details
+        else:
+            # Truly nothing new — synthesize a minimal detail rather than 500ing.
+            print("*** JORDAN V2 REPAIR: no new detail found, synthesizing fallback")
+            fallback_theme = parsed.themes[0] if parsed.themes else None
+            fallback_detail = JordanThemeDetail(
+                id=new_detail_id,
+                text="Alex shared new information relevant to this concern.",
+            )
+            if fallback_theme is not None:
+                fallback_theme.details.append(fallback_detail)
+            else:
+                parsed.themes.append(
+                    JordanTheme(
+                        id=new_theme_id,
+                        label="New consideration",
+                        summary="A new idea from Alex's latest answer.",
+                        details=[fallback_detail],
+                    )
+                )
+            new_details = [fallback_detail]
+
+    elif len(new_details) > 1:
+        # Duplicate new-detail ids — keep the first, rename the rest.
+        print("*** JORDAN V2 REPAIR: duplicate new detail ids, deduping")
+        for extra in new_details[1:]:
+            extra.id = f"{new_detail_id}-dup-{id(extra)}"
+        new_details = new_details[:1]
+
+    new_detail = new_details[0]
+    new_detail.source_question = request.user_question
+    new_detail.source_answer = request.alex_answer
+
+    # --- Cap at 3 themes, keeping the one with the new detail ---
+    if len(parsed.themes) > 3:
+        theme_with_new_detail = next(
+            (t for t in parsed.themes if any(d.id == new_detail.id for d in t.details)),
+            None,
+        )
+        remaining = [t for t in parsed.themes if t is not theme_with_new_detail]
+        parsed.themes = (
+            ([theme_with_new_detail] if theme_with_new_detail else []) + remaining
+        )[:3]
+
+    # --- Drop any stray IDs that aren't recognized (instead of raising) ---
+    allowed_theme_ids = existing_theme_ids | {new_theme_id} | {t.id for t in parsed.themes}
+    allowed_detail_ids = existing_detail_ids | {new_detail_id}
+
+    for theme in parsed.themes:
+        theme.details = [
+            d for d in theme.details
+            if d.id in allowed_detail_ids or d.id == new_detail.id
+        ]
+
+    # --- Validate the optional connection (unchanged, already lenient) ---
+    if parsed.latest_connection is None:
+        return
+
+    connection = parsed.latest_connection
+    returned_theme_ids = {theme.id for theme in parsed.themes}
+
+    if connection.theme_id not in returned_theme_ids:
+        parsed.latest_connection = None
+        return
+
+    if connection.earlier_detail_id not in existing_detail_ids:
+        parsed.latest_connection = None
+
+def _infer_concern_label(theme: JordanTheme) -> str:
+    """
+    Best-effort fallback label when the model fails to supply one.
+    Frames the theme as the user's concern (grounded in what they asked),
+    oriented toward deciding — not a raw topic, not fear language.
+    """
+    if not theme.details:
+        return "A question I'm working through"
+
+    # Prefer grounding in the user's actual question if we have it.
+    source_question = (theme.details[0].source_question or "").strip().lower()
+    text = source_question or theme.details[0].text.strip().lower()
+
+    if any(word in text for word in ["cost", "pay", "insurance", "afford", "financ"]):
+        return "Whether I can afford this"
+    if any(word in text for word in ["risk", "side effect", "harm", "safe", "danger"]):
+        return "How this could affect my health"
+    if any(word in text for word in ["consent", "withdraw", "leave", "quit", "voluntary", "change my mind"]):
+        return "How much say I'd have"
+    if any(word in text for word in ["eligib", "qualify", "criteria"]):
+        return "Whether this applies to me"
+    if any(word in text for word in ["time", "visit", "schedule", "travel", "appointment"]):
+        return "How much time this takes"
+    if any(word in text for word in ["care", "doctor", "team", "own physician"]):
+        return "How this affects my current care"
+    if any(word in text for word in ["privacy", "data", "record", "information"]):
+        return "How my information is handled"
+
+    return "A question I'm working through"
+
+def _infer_concern_summary(theme: JordanTheme) -> str:
+    if not theme.details:
+        return "Tracking something the user is trying to work out."
+    source_question = theme.details[0].source_question or theme.details[0].text
+    return f"Working out: {source_question[:90]}"
+
+@app.post(
+    "/jordan-turn-update-v2",
+    response_model=JordanTurnUpdateResponse,
+)
+async def jordan_turn_update_v2(
+    request: JordanDecisionTurnUpdateRequest,
+):
+    print("*** IN JORDAN TURN UPDATE V2")
+
+    current_themes = request.current_model.themes
+    recent_history = request.history[-8:]
+
+    new_theme_id = next_jordan_theme_id(
+        current_themes
+    )
+
+    new_detail_id = next_jordan_detail_id(
+        current_themes
+    )
+
+    system_prompt = """
+        You are Jordan, a warm guide helping someone make sense of what they learn from Alex about clinical trial participation.
+
+        Each turn:
+        1. add one lasting idea from Alex's answer to the workspace;
+        2. connect it to an earlier idea only when that helps explain a larger participation concern;
+        3. write one short message showing how the information affects the user's larger decision.
+
+        Return the COMPLETE updated themes collection.
+
+        THEME LABELS AND SUMMARIES
+        - Themes are the user's concerns — things they're trying to figure out in order to decide whether/how to participate — grounded in what the user has actually asked about, not textbook topic headings.
+        - A theme should read like a concern the user is holding, not a dictionary entry for a term Alex used.
+        - Base the theme on the user's own question(s), not just on whatever fact Alex happened to state.
+        - label: 2–6 words, phrased as the user's concern.
+        - summary: one sentence, at most 22 words, describing what the user is trying to work out on this concern in order to decide.
+        - Never write generic placeholders like "New Theme," "Untitled," or "Theme 1."
+        - When adding a detail to an EXISTING theme, keep its label/summary unless the new detail shows the concern is broader or different than first captured — then refine the wording, but keep it framed as the user's concern.
+        - When creating a NEW theme, base the label/summary on what the user was actually asking about, filtered through what that means for their decision — not just the raw content of Alex's answer.
+        
+        WORKSPACE
+        - Keep at most 3 themes.
+        - If 3 themes already exist, you MUST place the new detail into one of those existing themes.
+        - Never remove an existing theme or detail.
+        - Return every existing theme and detail unchanged, plus exactly one new detail.
+        - Themes should represent concerns someone may weigh when considering participation, not textbook categories.
+        - Add exactly one new detail on every turn.
+        - Preserve all existing theme and detail IDs.
+        - Use only the provided new IDs for new content.
+        - Add to an existing theme when the idea fits.
+        - Create a new theme only when needed.
+        - Choose the idea from Alex's answer that is most useful for evaluating participation.
+        - The new detail must contain only information Alex stated.
+        - Leave source_question and source_answer empty.
+        - The new detail's text must be no more than 25 words.
+
+        CONNECTION
+        Create latest_connection only when the new idea:
+        - clarifies another part of the same concern;
+        - shows a tradeoff or dependency;
+        - separates ideas that could be confused;
+        - or distinguishes general information from what depends on a specific trial.
+
+        Do not connect ideas only because they share a topic.
+        Return null when there is no meaningful connection.
+
+        MESSAGE
+        Write no more than 25 words, ideally 1 short sentence.
+
+        Perform one useful sensemaking move:
+        - break a broad concern into smaller decision questions;
+        - separate two meanings or concerns;
+        - connect multiple questions to one larger concern;
+        - or distinguish what is generally known from what must be checked for a specific trial.
+
+        Do not merely repeat Alex's answer.
+        Do not always suggest another topic.
+        Suggest one next direction only when it clearly helps with the larger concern.
+
+        You may use the user's question to understand their concern, but not as factual evidence.
+        Use only Alex's answer and the existing workspace details as factual sources.
+
+        Do not:
+        - give medical advice;
+        - recommend a trial or treatment;
+        - judge eligibility;
+        - ask for personal health information;
+        - add outside facts;
+        - claim the user believes something;
+        - mention IDs, notes, stored data, turns, or the system.
+
+        GUIDANCE TYPE
+        Choose the best fit:
+        - make_more_specific
+        - different_perspective
+        - related_idea
+        """
+
+    user_content = f"""
+        NEW THEME ID:
+        Use only if a new theme is needed.
+        {new_theme_id}
+
+        NEW DETAIL ID:
+        Use for exactly one new detail.
+        {new_detail_id}
+
+        USER'S LATEST QUESTION:
+        {request.user_question}
+
+        ALEX'S LATEST ANSWER:
+        {request.alex_answer}
+
+        ALEX ANSWER SCOPE:
+        {request.alex_answer_scope.value}
+
+        CURRENT THEMES:
+        {json.dumps(
+            [
+                theme.model_dump()
+                for theme in current_themes
+            ],
+            ensure_ascii=False,
+        )}
+
+        RECENT HISTORY:
+        {json.dumps(
+            [
+                turn.model_dump()
+                for turn in recent_history
+            ],
+            ensure_ascii=False,
+        )}
+
+        PREVIOUS GUIDANCE TYPES:
+        {json.dumps(
+            request.previous_guidance_types[-5:],
+            ensure_ascii=False,
+        )}
+
+        PREVIOUS GUIDANCE MESSAGES:
+        {json.dumps(
+            request.previous_guidance_messages[-5:],
+            ensure_ascii=False,
+        )}
+        """.strip()
+
+    try:
+        response = await client_chat.beta.chat.completions.parse(
+            model=UF_LOCAL_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+            temperature=0,
+            response_format=JordanTurnUpdateResponse,
+        )
+
+        parsed = response.choices[0].message.parsed
+
+        if parsed is None:
+            raw_content = response.choices[0].message.content
+
+            print(
+                "*** JORDAN V2 PARSE FAILED:",
+                raw_content,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to parse Jordan turn update",
+            )
+
+        try:
+            validate_jordan_turn_update_v2(
+                parsed=parsed,
+                request=request,
+                new_theme_id=new_theme_id,
+                new_detail_id=new_detail_id,
+            )
+        except HTTPException as validation_error:
+            # Only truly unrecoverable cases reach here now.
+            print("*** JORDAN V2 VALIDATION FAILED:", validation_error.detail)
+            raise
+
+            print(
+                "*** EXPECTED NEW IDS:",
+                {
+                    "theme_id": new_theme_id,
+                    "detail_id": new_detail_id,
+                },
+            )
+
+            print(
+                "*** CURRENT THEMES:",
+                json.dumps(
+                    [
+                        theme.model_dump()
+                        for theme in current_themes
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+            print(
+                "*** RETURNED THEMES:",
+                json.dumps(
+                    [
+                        theme.model_dump()
+                        for theme in parsed.themes
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+            raise
+
+        
+        print(
+            "*** JORDAN V2 WORKSPACE COUNTS:",
+            {
+                "previous_theme_count": len(current_themes),
+                "returned_theme_count": len(parsed.themes),
+                "previous_detail_count": sum(
+                    len(theme.details)
+                    for theme in current_themes
+                ),
+                "returned_detail_count": sum(
+                    len(theme.details)
+                    for theme in parsed.themes
+                ),
+                "new_detail_id": new_detail_id,
+            },
+        )
+
+        return parsed
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            "*** JORDAN TURN UPDATE V2 ERROR:",
+            repr(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update Jordan",
+        )
+
+@app.post(
+    "/jordan-turn-update",
+    response_model=JordanTurnUpdateResponse,
+)
+async def jordan_turn_update(
+    request: JordanTurnUpdateRequest,
+):
+    current_themes = request.current_model.themes
+    recent_history = request.history[-8:]
+
+    new_theme_id = next_jordan_theme_id(current_themes)
+    new_detail_id = next_jordan_detail_id(current_themes)
+
+    system_prompt = """
+    You are Jordan, a warm, thoughtful guide helping someone organize and connect what they learn about clinical trial participation while talking with Alex.
+    Each turn:
+    1. organize the newest idea into themes,
+    2. identify a meaningful connection to an earlier idea only when one exists,
+    3. write one short conversational message that helps the user continue exploring.
+    Return the COMPLETE updated themes collection.
+
+    ------------------------------------------------------------------
+    STEP 1 — ORGANIZE THE NEW IDEA INTO THEMES
+    ------------------------------------------------------------------
+    Themes are broad concepts that organize related ideas.
+    - Keep at most 5 themes.
+    - If 5 themes already exist, add the new idea to one of them.
+    - You may rename or merge themes, but never create a 6th theme.
+    - Preserve existing theme and detail IDs.
+    - Only use the provided NEW THEME ID and NEW DETAIL ID for anything new.
+    Each theme contains:
+    - id
+    - label (2–5 words)
+    - summary (≤22 words)
+    - details
+    For the newest turn:
+    - Identify the single most useful idea from Alex's answer.
+    - Add exactly one new detail.
+    - Place it into an existing theme when it fits; otherwise create a new theme.
+    Details should:
+    - capture one lasting idea, not summarize Alex's whole answer;
+    - use simple conceptual language;
+    - contain only information Alex stated;
+    - leave source_question and source_answer empty.
+
+    ------------------------------------------------------------------
+    STEP 2 — IDENTIFY A REAL CONNECTION
+    ------------------------------------------------------------------
+    Create latest_connection only when the newest detail meaningfully builds on an earlier detail.
+    Good connections:
+    - explain or expand an earlier idea,
+    - describe another part of the same process,
+    - compare two ideas,
+    - show a dependency or tradeoff.
+    Do not create a connection simply because two details share a topic.
+    If no meaningful connection exists, return null.
+    A connection includes:
+    - theme_id
+    - earlier_detail_id
+    - label (2–5 words)
+    - text (maximum 25 words)
+    - earlier_question_reference (maximum 10 words)
+    Never mention IDs, notes, memory, turns, or the system.
+
+    ------------------------------------------------------------------
+    STEP 3 — WRITE JORDAN'S MESSAGE
+    ------------------------------------------------------------------
+    Maximum 35 words. Ideally 2 short sentences.
+    Jordan's message should:
+    - briefly organize the newest idea;
+    - mention a meaningful connection when one exists;
+    - otherwise simply highlight the new idea;
+    - end by suggesting one specific direction to explore next.
+    The exploration direction must come directly from Alex's answer.
+    - The exploration direction MUST point to something Alex did NOT already explain or resolve in that same answer. For example, if Alex mentions "sponsor" you could suggest expanding on who sponsors typically are.
+    - If Alex mentioned several equally important ideas, do not select one to focus on. Instead, briefly name the options and invite the user to ask for more details about whichever one interests them. 
+    Never:
+    - introduce concepts Alex did not mention;
+    - answer the suggested direction;
+    - use outside knowledge;
+    - attribute Alex's explanation to the user ("Alex..." not "you...");
+    - write a complete question.
+    If this is the first topic:
+    - do not mention connections;
+    - briefly highlight the main idea Alex introduced;
+    - point the user toward something that Alex briefly mentioned without fully explaining
+    - if Alex mentioned several equally important ideas, do not select one to focus on. Instead, briefly name the options and invite the user to ask for more details about whichever one interests them. 
+    If Alex says the available sources do not contain the answer:
+    - briefly acknowledge what remains unknown;
+    - do not suggest another version of the same unanswered question;
+    - If Alex's response included something it could speak to (e.g. "my sources say X, but I couldn't find Y"), point the user toward asking more about that X.
+    - Otherwise, look back at the conversation so far and suggest revisiting something Alex touched on but didn't fully explain.
+
+    ------------------------------------------------------------------
+    GUIDANCE TYPE
+    ------------------------------------------------------------------
+    Choose the guidance_type that best matches Jordan's message:
+    - make_more_specific
+    - different_perspective
+    - related_idea
+    Prefer variety when multiple types fit equally well.
+
+    ------------------------------------------------------------------
+    CONTENT BOUNDARIES
+    ------------------------------------------------------------------
+    - Use only Alex's latest answer and the stored themes as factual sources.
+    - Stay within general clinical trial education.
+    - Do not recommend specific trials, websites, enrollment, eligibility, talking to any person, or medical advice.
+    - When pointing the user toward a topic to explore further, phrase it as something to ask about (e.g. "you might want to ask about travel or lodging assistance"), not as an action directed at a person.
+    """
+
+    user_content = f"""
+    NEW THEME ID, USE ONLY IF A NEW THEME IS REQUIRED:
+    {new_theme_id}
+
+    NEW DETAIL ID, USE FOR THE ONE NEW DETAIL:
+    {new_detail_id}
+
+    USER'S LATEST QUESTION:
+    {request.user_question}
+
+    DR. ALEX'S LATEST ANSWER:
+    {request.alex_answer}
+
+    CURRENT THEMES:
+    {json.dumps(
+        [theme.model_dump() for theme in current_themes],
+        ensure_ascii=False,
+    )}
+
+    RECENT HISTORY:
+    {json.dumps(
+        [turn.model_dump() for turn in recent_history],
+        ensure_ascii=False,
+    )}
+
+    PREVIOUS GUIDANCE TYPES:
+    {json.dumps(
+        request.previous_guidance_types[-5:],
+        ensure_ascii=False,
+    )}
+
+    PREVIOUS GUIDANCE MESSAGES:
+    {json.dumps(
+        request.previous_guidance_messages[-5:],
+        ensure_ascii=False,
+    )}
+    """
+
+    try:
+        response = await client_chat.beta.chat.completions.parse(
+            model=UF_LOCAL_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+            temperature=0,
+            response_format=JordanTurnUpdateResponse,
+        )
+
+        parsed = response.choices[0].message.parsed
+
+        if parsed is None:
+            raw_content = response.choices[0].message.content
+
+            print(
+                "*** JORDAN TURN UPDATE PARSE FAILED:",
+                raw_content,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to parse Jordan turn update",
+            )
+
+        existing_theme_ids = {
+            theme.id
+            for theme in request.current_model.themes
+        }
+
+        existing_detail_ids = {
+            detail.id
+            for theme in request.current_model.themes
+            for detail in theme.details
+        }
+
+        all_returned_details = [
+            detail
+            for theme in parsed.themes
+            for detail in theme.details
+        ]
+
+        new_details = [
+            detail
+            for detail in all_returned_details
+            if detail.id == new_detail_id
+        ]
+
+        if len(new_details) != 1:
+            raise HTTPException(
+                status_code=500,
+                detail="Jordan must create exactly one new detail",
+            )
+
+        # The server controls the original question and answer.
+        new_detail = new_details[0]
+        new_detail.source_question = request.user_question
+        new_detail.source_answer = request.alex_answer
+
+        # Reject unknown IDs instead of silently accepting invented structure.
+        allowed_theme_ids = existing_theme_ids | {new_theme_id}
+        allowed_detail_ids = existing_detail_ids | {new_detail_id}
+
+        for theme in parsed.themes:
+            if theme.id not in allowed_theme_ids:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Jordan returned an invalid theme ID: {theme.id}",
+                )
+
+            for detail in theme.details:
+                if detail.id not in allowed_detail_ids:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Jordan returned an invalid detail ID: {detail.id}",
+                    )
+
+        # Keep the workspace compact.
+        # Keep the workspace compact without dropping the newest detail.
+        if len(parsed.themes) > 3:
+            theme_with_new_detail = next(
+                (
+                    theme
+                    for theme in parsed.themes
+                    if any(detail.id == new_detail_id for detail in theme.details)
+                ),
+                None,
+            )
+
+            remaining_themes = [
+                theme
+                for theme in parsed.themes
+                if theme is not theme_with_new_detail
+            ]
+
+            parsed.themes = (
+                ([theme_with_new_detail] if theme_with_new_detail else [])
+                + remaining_themes
+            )[:3]
+
+        if parsed.latest_connection:
+            connection = parsed.latest_connection
+
+            valid_theme_ids = {
+                theme.id
+                for theme in parsed.themes
+            }
+
+            if connection.theme_id not in valid_theme_ids:
+                parsed.latest_connection = None
+
+            elif connection.earlier_detail_id not in existing_detail_ids:
+                # It must point backward, never to the newest detail.
+                parsed.latest_connection = None
+
+        return parsed
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            "*** JORDAN TURN UPDATE ERROR:",
+            repr(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update Jordan",
+        )
 
 @app.post("/evaluate-goal-progress", response_model=GoalEvalResponse)
 async def evaluate_goal_progress(request: GoalEvalRequest):
@@ -1413,6 +2786,23 @@ async def suggest_more_goals(request: dict):
     )
 
     return goals
+
+from adaptive_chat import (
+    create_adaptive_router,
+    RagResponseModel,
+)
+
+adaptive_router = create_adaptive_router(
+    client_chat=client_chat,
+    model_name=UF_LOCAL_MODEL,
+    rag=rag,
+    preprocess_question=preprocess_question,
+    rag_response_model=RagResponseModel,
+    build_resource_cards=build_resource_cards,
+    clean_alex_answer=clean_alex_answer,
+)
+
+app.include_router(adaptive_router)
 
 @app.get("/")
 async def root():

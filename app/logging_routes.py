@@ -1,8 +1,10 @@
 import pyodbc
 import os
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
+import json
+from typing import Literal
 from dotenv import load_dotenv
 
 
@@ -25,7 +27,7 @@ def get_conn():
 
 class SessionLog(BaseModel):
     participant_id: str
-    condition: int
+    condition: int | str
     start_time: str
 
 class LandingQuestionLog(BaseModel):
@@ -44,8 +46,17 @@ class CompletionLog(BaseModel):
     participant_id: str
     end_time: str
 
+class InteractionCountIncrement(BaseModel):
+    participant_id: str
+    field: Literal[
+        "jordan_click_count",
+        "source_open_count",
+        "source_save_count",
+    ]
+
 @router.post("/log-session")
 def log_session(body: SessionLog):
+    print("BODY", body)
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -106,3 +117,36 @@ def log_completion(body: CompletionLog):
         )
         conn.commit()
     return {"message": "completion logged"}
+    allowed_fields = {
+        "jordan_click_count",
+        "source_open_count",
+        "source_save_count",
+    }
+
+    if body.field not in allowed_fields:
+        return {"message": "invalid field"}
+
+    with get_conn() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            f"""
+            UPDATE {table_name}
+            SET {body.field} = COALESCE({body.field}, 0) + 1
+            WHERE participant_id = ?
+            """,
+            body.participant_id,
+        )
+
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Participant not found",
+            )
+
+        conn.commit()
+
+    return {
+        "message": "count incremented",
+        "field": body.field,
+    }
