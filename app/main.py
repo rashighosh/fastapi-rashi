@@ -126,7 +126,7 @@ def read_pdf_pages(path: str) -> List[Dict]:
 def chunk_pages(
     pages: List[Dict],
     chunk_size: int = 1200,
-    overlap: int = 200
+    overlap: int = 200,
 ) -> List[Dict]:
     chunks = []
 
@@ -137,11 +137,16 @@ def chunk_pages(
         start = 0
 
         while start < len(text):
-            end = min(len(text), start + chunk_size)
+            proposed_end = min(len(text), start + chunk_size)
+            end = proposed_end
 
-            sentence_end = text.rfind(".", start, end)
-            if sentence_end != -1 and sentence_end > start + 300:
-                end = sentence_end + 1
+            # Prefer ending at a sentence boundary, unless this is already
+            # the final chunk on the page.
+            if proposed_end < len(text):
+                sentence_end = text.rfind(".", start, proposed_end)
+
+                if sentence_end != -1 and sentence_end > start + 300:
+                    end = sentence_end + 1
 
             chunk = text[start:end].strip()
 
@@ -153,7 +158,18 @@ def chunk_pages(
                     "char_end": end,
                 })
 
-            start = max(end - overlap, start + 1)
+            # We reached the end of the page. Do not create overlapping
+            # one-character-shifted copies of the final text.
+            if end >= len(text):
+                break
+
+            next_start = max(0, end - overlap)
+
+            # Safety check to guarantee meaningful forward movement.
+            if next_start <= start:
+                next_start = end
+
+            start = next_start
 
     return chunks
 
@@ -168,25 +184,39 @@ def read_pdf_text(path: str) -> str:
 
     return "\n".join(pages)
 
-def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
+def chunk_text(
+    text: str,
+    chunk_size: int = 1200,
+    overlap: int = 200,
+) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
     chunks = []
     start = 0
 
     while start < len(text):
-        end = min(len(text), start + chunk_size)
+        proposed_end = min(len(text), start + chunk_size)
+        end = proposed_end
 
-        # try to end at sentence boundary
-        sentence_end = text.rfind(".", start, end)
-        if sentence_end != -1 and sentence_end > start + 300:
-            end = sentence_end + 1
+        if proposed_end < len(text):
+            sentence_end = text.rfind(".", start, proposed_end)
+
+            if sentence_end != -1 and sentence_end > start + 300:
+                end = sentence_end + 1
 
         chunk = text[start:end].strip()
 
         if len(chunk.split()) >= 20:
             chunks.append(chunk)
 
-        start = max(end - overlap, start + 1)
+        if end >= len(text):
+            break
+
+        next_start = max(0, end - overlap)
+
+        if next_start <= start:
+            next_start = end
+
+        start = next_start
 
     return chunks
 
@@ -269,6 +299,10 @@ class LocalRAG:
 
             pages = read_pdf_pages(path)
             chunks = chunk_pages(pages)
+            print(
+                f"*** {file_name}: {len(chunks)} chunks "
+                f"across {len(pages)} pages"
+            )
 
             for j, chunk in enumerate(chunks):
                 all_chunks.append(chunk["text"])
@@ -283,6 +317,20 @@ class LocalRAG:
                     "char_start": chunk["char_start"],
                     "char_end": chunk["char_end"],
                 })
+
+        word_counts = [len(chunk.split()) for chunk in all_chunks]
+
+        print("*** TOTAL CHUNKS:", len(word_counts))
+        print("*** MIN WORDS:", min(word_counts))
+        print("*** MAX WORDS:", max(word_counts))
+        print("*** AVG WORDS:", sum(word_counts) / len(word_counts))
+
+        print("*** TOTAL RAG CHUNKS:", len(all_chunks))
+        print(
+            "*** CHUNK WORD COUNTS:",
+            min(len(chunk.split()) for chunk in all_chunks),
+            max(len(chunk.split()) for chunk in all_chunks),
+        )
 
         if not all_chunks:
             raise ValueError("No chunks were created. Check your PDF paths or PDF text extraction.")
@@ -1031,91 +1079,101 @@ async def tts(request: TTSRequest):
 
     duration = len(pcm) / samplerate
 
-    # Send the generated audio to Whisper.
-    whisper_buffer = io.BytesIO(audio_bytes)
-    whisper_buffer.name = "audio.mp3"
+    # # Send the generated audio to Whisper.
+    # whisper_buffer = io.BytesIO(audio_bytes)
+    # whisper_buffer.name = "audio.mp3"
 
-    transcript = await client_chat.audio.transcriptions.create(
-        model="whisper-large-v3",
-        file=whisper_buffer,
-        response_format="verbose_json",
-        timestamp_granularities=["word"],
-        prompt=spoken_text,
-        temperature=0,
-    )
+    # transcript = await client_chat.audio.transcriptions.create(
+    #     model="whisper-large-v3",
+    #     file=whisper_buffer,
+    #     response_format="verbose_json",
+    #     timestamp_granularities=["word"],
+    #     prompt=spoken_text,
+    #     temperature=0,
+    # )
 
-    timestamps = []
+    # timestamps = []
 
-    transcript_data = transcript.model_dump()
+    # transcript_data = transcript.model_dump()
 
-    for segment in transcript_data.get("segments", []):
-        for word_data in segment.get("words", []):
-            word = word_data.get("word", "").strip()
-            clean_word = normalize_word(word)
+    # for segment in transcript_data.get("segments", []):
+    #     for word_data in segment.get("words", []):
+    #         word = word_data.get("word", "").strip()
+    #         clean_word = normalize_word(word)
 
-            start = word_data.get("start")
-            end = word_data.get("end")
+    #         start = word_data.get("start")
+    #         end = word_data.get("end")
 
-            if not clean_word:
-                continue
+    #         if not clean_word:
+    #             continue
 
-            if start is None or end is None:
-                continue
+    #         if start is None or end is None:
+    #             continue
 
-            word_duration = end - start
+    #         word_duration = end - start
 
-            # Reject only clearly invalid timestamps.
-            if word_duration <= 0.01:
-                continue
+    #         # Reject only clearly invalid timestamps.
+    #         if word_duration <= 0.01:
+    #             continue
 
-            if word_duration > 2.0:
-                continue
+    #         if word_duration > 2.0:
+    #             continue
 
-            timestamps.append({
-                "word": word,
-                "start": float(start),
-                "end": float(end),
-            })
+    #         timestamps.append({
+    #             "word": word,
+    #             "start": float(start),
+    #             "end": float(end),
+    #         })
 
-    expected_word_count = len([
-        word
-        for word in spoken_text.split()
-        if normalize_word(word)
-    ])
+    # expected_word_count = len([
+    #     word
+    #     for word in spoken_text.split()
+    #     if normalize_word(word)
+    # ])
 
-    timestamps = sanitize_timestamps(timestamps, duration)
+    # timestamps = sanitize_timestamps(timestamps, duration)
 
-    timestamp_coverage = (
-        len(timestamps) / expected_word_count
-        if expected_word_count > 0
-        else 0
-    )
+    # timestamp_coverage = (
+    #     len(timestamps) / expected_word_count
+    #     if expected_word_count > 0
+    #     else 0
+    # )
 
-    print(
-        "[TTS TIMESTAMP DEBUG]",
-        {
-            "audio_duration": round(duration, 2),
-            "expected_words": expected_word_count,
-            "timestamp_words": len(timestamps),
-            "coverage": round(timestamp_coverage, 2),
-            "whisper_text": transcript_data.get("text", ""),
-        },
-    )
+    # print(
+    #     "[TTS TIMESTAMP DEBUG]",
+    #     {
+    #         "audio_duration": round(duration, 2),
+    #         "expected_words": expected_word_count,
+    #         "timestamp_words": len(timestamps),
+    #         "coverage": round(timestamp_coverage, 2),
+    #         "whisper_text": transcript_data.get("text", ""),
+    #     },
+    # )
 
-    # Always use the original spoken text for subtitle words.
-    # Whisper can mishear numbers such as Phase 1, Phase 2, and Phase 3.
+    # # Always use the original spoken text for subtitle words.
+    # # Whisper can mishear numbers such as Phase 1, Phase 2, and Phase 3.
+    # timestamps = create_fallback_timestamps(
+    #     spoken_text,
+    #     duration,
+    # )
+
+    # return {
+    #     "audio": base64.b64encode(
+    #         audio_bytes,
+    #     ).decode("utf-8"),
+    #     "timestamps": timestamps,
+    # }
+
     timestamps = create_fallback_timestamps(
         spoken_text,
         duration,
     )
 
     return {
-        "audio": base64.b64encode(
-            audio_bytes,
-        ).decode("utf-8"),
+        "audio": base64.b64encode(audio_bytes).decode("utf-8"),
         "timestamps": timestamps,
     }
-  
+    
 async def preprocess_question(question, history):
     print("***IN PREPROCESS QUESTION")
     recent_history = history[-4:] if history else []
@@ -1131,14 +1189,17 @@ async def preprocess_question(question, history):
         - political_or_policy
         - unrelated
 
-        2. If the route is clinical_trials_education, rewrite the user's latest message into a concise standalone search query optimized for retrieving clinical trial education documents.
+        2. If the route is clinical_trials_education,
+        rewrite the user's latest message into a concise
+        standalone search query.
 
         Rules:
-        - Preserve the user's intent.
-        - Do NOT answer the question.
-        - Do NOT invent details.
-        - Include relevant clinical trial terminology when appropriate.
-        - If the route is NOT clinical_trials_education, simply copy the original question as the search_query.
+        - Preserve the user's meaning exactly.
+        - Stay as close as possible to the user's original wording.
+        - Only rewrite to resolve pronouns or references from conversation history.
+        - Do not narrow or broaden the question.
+        - Do not introduce medical terminology or assumptions that were not in the user's message.
+        - Do not optimize for experts; optimize for retrieving patient education documents.
 
         Recent conversation:
         {recent_history}
@@ -1156,6 +1217,56 @@ async def preprocess_question(question, history):
     print("***PREPROCESS RETURNED", response.choices[0].message.parsed)
 
     return response.choices[0].message.parsed
+
+class RagDebugRequest(BaseModel):
+    question: str
+    k: int = 10
+
+
+@app.post("/debug-rag")
+async def debug_rag(request: RagDebugRequest):
+    # Generate the same search query used by Alex.
+    preprocess = await preprocess_question(
+        request.question,
+        history=[],
+    )
+
+    results_original = rag.retrieve(
+        request.question,
+        k=request.k,
+    )
+
+    results_rewritten = rag.retrieve(
+        preprocess.search_query,
+        k=request.k,
+    )
+
+    return {
+        "original_question": request.question,
+        "search_query": preprocess.search_query,
+
+        "original_results": [
+            {
+                "rank": index + 1,
+                "score": result["score"],
+                "title": result["meta"].get("title"),
+                "page_number": result["meta"].get("page_number"),
+                "text": result["text"],
+            }
+            for index, result in enumerate(results_original)
+        ],
+
+        "rewritten_results": [
+            {
+                "rank": index + 1,
+                "score": result["score"],
+                "title": result["meta"].get("title"),
+                "page_number": result["meta"].get("page_number"),
+                "text": result["text"],
+            }
+            for index, result in enumerate(results_rewritten)
+        ],
+    }
 
 def clean_alex_answer(text: str) -> str:
     text = text.strip()

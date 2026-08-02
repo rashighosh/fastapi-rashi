@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from difflib import SequenceMatcher
+import asyncio
 
 # -------------------------------------------------------------------
 # JORDAN MENTAL MODEL
@@ -136,6 +137,63 @@ class AdaptiveChatResponse(BaseModel):
     answer_scope: AnswerScope
 
 # -------------------------------------------------------------------
+# RESPONSE MODELS
+# -------------------------------------------------------------------
+
+class AdaptiveRouteRequest(BaseModel):
+    message: str
+    history: list[AdaptiveChatTurn] = Field(default_factory=list)
+
+
+class AdaptiveRouteResponse(BaseModel):
+    route: Literal["fact_finding", "hypothesis_testing"]
+    reason: str
+
+
+class AdaptiveFrameRequest(BaseModel):
+    message: str
+    history: list[AdaptiveChatTurn] = Field(default_factory=list)
+
+
+class AdaptiveFrameResponse(BaseModel):
+    message: str
+    information_need: str
+
+
+class AdaptiveAlexRequest(BaseModel):
+    original_message: str
+    information_need: str
+    history: list[AdaptiveChatTurn] = Field(default_factory=list)
+
+
+class AdaptiveAlexResponse(BaseModel):
+    search_query: str
+    answer: str
+    sources: list[Any] = Field(default_factory=list)
+    confidence: str
+    talking_points: list[str] = Field(default_factory=list)
+    answer_scope: AnswerScope
+    has_supported_information: bool
+
+
+class AdaptiveJordanRequest(BaseModel):
+    original_message: str
+    alex_answer: str
+    answer_scope: AnswerScope
+    has_supported_information: bool
+    history: list[AdaptiveChatTurn] = Field(default_factory=list)
+    mental_model: str | None = None
+    knowledge_gaps: list[str] = Field(default_factory=list)
+
+
+class AdaptiveJordanResponse(BaseModel):
+    message: Optional[str] = None
+    mental_model: str
+    highlighted_text: Optional[str] = None
+    change_type: Optional[ChangeType] = None
+    knowledge_gaps: list[str] = Field(default_factory=list)
+
+# -------------------------------------------------------------------
 # ROUTER FACTORY
 #
 # main.py will pass its existing RAG object and LLM client into here.
@@ -179,7 +237,7 @@ def extract_json_object(text: str) -> dict:
 def append_history_for_llm(
     messages: list[dict],
     history: list[AdaptiveChatTurn],
-    limit: int = 20,
+    limit: int = 10,
 ) -> None:
     """
     Add stored user/Alex/Jordan turns to an OpenAI-style message list.
@@ -415,6 +473,43 @@ def create_adaptive_router(
     # ---------------------------------------------------------------
     # 3. ALEX RETRIEVES AND EXPLAINS EVIDENCE
     # ---------------------------------------------------------------
+    def merge_rag_results(
+        *result_groups: list[Any],
+        limit: int = 8,
+    ) -> list[Any]:
+        """
+        Combine retrieval results, remove duplicate chunks,
+        keep the highest score for each chunk, and return
+        the best results overall.
+        """
+        best_by_chunk = {}
+
+        for results in result_groups:
+            for result in results:
+                metadata = result.get("meta", {})
+
+                chunk_key = (
+                    metadata.get("file"),
+                    metadata.get("page_number"),
+                    metadata.get("chunk_id"),
+                )
+
+                existing = best_by_chunk.get(chunk_key)
+
+                if (
+                    existing is None
+                    or result.get("score", 0) > existing.get("score", 0)
+                ):
+                    best_by_chunk[chunk_key] = result
+
+        merged_results = sorted(
+            best_by_chunk.values(),
+            key=lambda result: result.get("score", 0),
+            reverse=True,
+        )
+
+        return merged_results[:limit]
+
     async def prepare_alex_search(
         *,
         information_need: str,
@@ -425,18 +520,70 @@ def create_adaptive_router(
             history,
         )
 
-        print("*** ADAPTIVE SEARCH QUERY:", preprocess.search_query)
+        original_query = information_need.strip()
+        rewritten_query = preprocess.search_query.strip()
 
-        results = rag.retrieve(
-            preprocess.search_query,
+        print("*** ADAPTIVE ORIGINAL QUERY:", original_query)
+        print("*** ADAPTIVE REWRITTEN QUERY:", rewritten_query)
+
+        # Always search using the natural-language information need.
+        original_results = rag.retrieve(
+            original_query,
             k=8,
         )
 
+        # Avoid running the identical search twice.
+        if rewritten_query.casefold() == original_query.casefold():
+            results = await asyncio.to_thread(
+                rag.retrieve,
+                original_query,
+                8,
+            )
+            retrieval_mode = "original_only_same_query"
+
+        else:
+            original_results, rewritten_results = await asyncio.gather(
+                asyncio.to_thread(
+                    rag.retrieve,
+                    original_query,
+                    8,
+                ),
+                asyncio.to_thread(
+                    rag.retrieve,
+                    rewritten_query,
+                    8,
+                ),
+            )
+
+            results = merge_rag_results(
+                original_results,
+                rewritten_results,
+                limit=8,
+            )
+
+            retrieval_mode = "original_and_rewritten"
+        print("*** ADAPTIVE RETRIEVAL MODE:", retrieval_mode)
+
+        for index, result in enumerate(results):
+            metadata = result.get("meta", {})
+
+            print(
+                "*** MERGED RESULT:",
+                {
+                    "rank": index + 1,
+                    "score": result.get("score"),
+                    "title": metadata.get("title"),
+                    "page": metadata.get("page_number"),
+                    "chunk_id": metadata.get("chunk_id"),
+                },
+            )
+
         return {
-            "search_query": preprocess.search_query,
+            # Keep this field unchanged so the rest of your code still works.
+            "search_query": rewritten_query,
             "results": results,
         }
-
+    
     async def run_alex(
         *,
         original_message: str,
@@ -472,28 +619,21 @@ def create_adaptive_router(
             Use ONLY the provided context as factual evidence.
 
             Answer the user's current question in plain, conversational language.
-            When the concern behind the question is clear, respond to that concern
-            while staying within the provided facts.
 
             When answering:
-            - If the retrieved sources directly answer the general question, give the
-            supported answer and set answer_scope to general_answer.
-            - If the retrieved sources provide useful general information but some details
-            depend on the specific trial, explain the useful general information first.
-            Then briefly name 2–3 details that would need to be checked for that trial.
-            Set answer_scope to varies_by_trial.
-            - If the retrieved sources provide useful general information but the user is
-            asking what is best or appropriate for their own situation, explain the
-            useful general information without making a personal recommendation.
-            Set answer_scope to personalized_decision.
-            - If the retrieved sources provide almost no useful information, clearly say
-            that the sources you searched did not provide enough information to answer.
-            Do not invent an answer. Return no source_explanations or talking_points.
-            Set answer_scope to insufficient_context.
+            - Answer as completely as the evidence supports, but no further.
+            - If the evidence provides useful general information, explain it before noting what varies by trial or by person.
+            - If the evidence only partially answers the question, clearly explain what the evidence establishes and what remains unknown.
+            - Do not present inferences, examples, definitions, or status labels as established facts unless the context explicitly states them.
+            - Do not guess or add information that is not supported by the provided context.
+            - Do not simply tell the user to ask the study team if the context contains useful general information.
+            - If the context provides almost no useful information, clearly say so instead of guessing.
 
-            Do not use insufficient_context simply because some details vary by trial.
-            Do not respond only by telling the user to ask the study team when the
-            retrieved sources contain useful general information.
+            Choose answer_scope:
+            - general_answer: The context directly answers the question.
+            - varies_by_trial: The context provides useful general information, but important details depend on the specific trial.
+            - personalized_decision: The context provides useful general information, but the user's personal situation cannot be answered. Do not recommend, discourage, or judge whether participation is worth it. Instead, explain what factors people commonly consider when making that decision.
+            - insufficient_context: The context provides little or no useful information.
 
             Use simple words and short sentences.
             Explain medical terms in plain language.
@@ -514,19 +654,15 @@ def create_adaptive_router(
             - Return at most 3.
             - Each should be 4–9 words.
             - Use plain language.
-            - Keep them in the same order as the answer.
+            - Follow the same order as the answer.
             - Do not include citations or source names.
-            - Return an empty list only when no useful supported information can
-            be given.
+            - Return an empty list only when answer_scope is insufficient_context.
 
             For each source_explanation:
-            - Use the exact source ID in the id field.
-            - Explain why it helped in relevance_explanation.
+            - Use the exact source ID.
             - Include only sources that directly support the answer.
-            - Return 1–3 source_explanations when useful supported information is
-            provided.
-            - Return an empty list only when the context provides almost no useful
-            information.
+            - Briefly explain how each source supports the answer.
+            - Return 1–3 source_explanations unless answer_scope is insufficient_context.
 
             Do not invent source IDs.
         """
@@ -1175,6 +1311,104 @@ def create_adaptive_router(
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    # ---------------------------------------------------------------
+    # SEPARATED CALLS
+    # ---------------------------------------------------------------
+
+    @router.post("/route", response_model=AdaptiveRouteResponse)
+    async def adaptive_route(
+        request: AdaptiveRouteRequest,
+    ) -> AdaptiveRouteResponse:
+        print("\n*** ADAPTIVE ROUTE")
+        print("*** USER:", request.message)
+
+        result = await route_turn(
+            message=request.message,
+            history=request.history,
+        )
+
+        return AdaptiveRouteResponse(
+            route=result.route,
+            reason=result.reason,
+        )
+
+
+    @router.post("/frame", response_model=AdaptiveFrameResponse)
+    async def adaptive_frame(
+        request: AdaptiveFrameRequest,
+    ) -> AdaptiveFrameResponse:
+        print("\n*** ADAPTIVE FRAME")
+        print("*** USER:", request.message)
+
+        result = await frame_information_need(
+            message=request.message,
+            history=request.history,
+        )
+
+        return AdaptiveFrameResponse(
+            message=result.message,
+            information_need=result.information_need,
+        )
+
+
+    @router.post("/alex", response_model=AdaptiveAlexResponse)
+    async def adaptive_alex(
+        request: AdaptiveAlexRequest,
+    ) -> AdaptiveAlexResponse:
+        print("\n*** ADAPTIVE ALEX")
+        print("*** INFORMATION NEED:", request.information_need)
+
+        search = await prepare_alex_search(
+            information_need=request.information_need,
+            history=request.history,
+        )
+
+        alex_result = await run_alex(
+            original_message=request.original_message,
+            information_need=request.information_need,
+            search_query=search["search_query"],
+            results=search["results"],
+            history=request.history,
+        )
+
+        return AdaptiveAlexResponse(
+            search_query=alex_result["search_query"],
+            answer=alex_result["answer"],
+            sources=alex_result["sources"],
+            confidence=alex_result["confidence"],
+            talking_points=alex_result["talking_points"],
+            answer_scope=alex_result["answer_scope"],
+            has_supported_information=alex_result[
+                "has_supported_information"
+            ],
+        )
+
+
+    @router.post("/jordan", response_model=AdaptiveJordanResponse)
+    async def adaptive_jordan(
+        request: AdaptiveJordanRequest,
+    ) -> AdaptiveJordanResponse:
+        print("\n*** ADAPTIVE JORDAN")
+        print("*** USER:", request.original_message)
+
+        result = await integrate_answer(
+            original_message=request.original_message,
+            alex_answer=request.alex_answer,
+            answer_scope=request.answer_scope,
+            has_supported_information=request.has_supported_information,
+            history=request.history,
+            mental_model=request.mental_model,
+            knowledge_gaps=request.knowledge_gaps,
+        )
+
+        return AdaptiveJordanResponse(
+            message=result.message,
+            mental_model=result.mental_model,
+            highlighted_text=result.highlighted_text,
+            change_type=result.change_type,
+            knowledge_gaps=result.knowledge_gaps,
         )
 
     return router
