@@ -609,7 +609,7 @@ class JordanThemeDetail(BaseModel):
 class JordanTheme(BaseModel):
     id: str
     label: str
-    summary: str
+    takeaway: str
     details: List[JordanThemeDetail] = Field(default_factory=list)
 
 
@@ -629,11 +629,10 @@ class JordanConnection(BaseModel):
     # Natural reminder of what the user asked earlier.
     earlier_question_reference: str
 
-
 class JordanConversationModelData(BaseModel):
+    working_hypothesis: str = ""
     themes: List[JordanTheme] = Field(default_factory=list)
     latestConnection: JordanConnection | None = None
-
 
 class JordanTurnUpdateRequest(BaseModel):
     user_question: str
@@ -651,22 +650,28 @@ class JordanTurnUpdateRequest(BaseModel):
 
     previous_guidance_messages: List[str] = Field(default_factory=list)
 
-
 class JordanTurnUpdateResponse(BaseModel):
-    # The complete updated theme collection replaces frontend memory.
+    # Jordan's best current interpretation of what the user
+    # appears to be trying to understand across the conversation.
+    working_hypothesis: str
+
+    # Complete updated collection.
+    # These now represent broad parts of the developing understanding,
+    # NOT one theme per user question.
     themes: List[JordanTheme]
 
-    # Present only when the latest idea meaningfully builds on an earlier one.
-    latest_connection: JordanConnection | None = None
-
-    guidance_type: Literal[
-        "make_more_specific",
-        "different_perspective",
-        "related_idea",
+    update_type: Literal[
+        "strengthens",
+        "expands",
+        "shifts",
+        "new_part",
     ]
 
-    # The only text Jordan speaks and the primary text shown to the user.
+    # The only text Jordan speaks.
     jordan_message: str
+
+    # Keep for compatibility for now, but V2 does not use connections.
+    latest_connection: JordanConnection | None = None
 
 class QueryPreprocess(BaseModel):
     route: Literal[
@@ -1079,91 +1084,6 @@ async def tts(request: TTSRequest):
 
     duration = len(pcm) / samplerate
 
-    # # Send the generated audio to Whisper.
-    # whisper_buffer = io.BytesIO(audio_bytes)
-    # whisper_buffer.name = "audio.mp3"
-
-    # transcript = await client_chat.audio.transcriptions.create(
-    #     model="whisper-large-v3",
-    #     file=whisper_buffer,
-    #     response_format="verbose_json",
-    #     timestamp_granularities=["word"],
-    #     prompt=spoken_text,
-    #     temperature=0,
-    # )
-
-    # timestamps = []
-
-    # transcript_data = transcript.model_dump()
-
-    # for segment in transcript_data.get("segments", []):
-    #     for word_data in segment.get("words", []):
-    #         word = word_data.get("word", "").strip()
-    #         clean_word = normalize_word(word)
-
-    #         start = word_data.get("start")
-    #         end = word_data.get("end")
-
-    #         if not clean_word:
-    #             continue
-
-    #         if start is None or end is None:
-    #             continue
-
-    #         word_duration = end - start
-
-    #         # Reject only clearly invalid timestamps.
-    #         if word_duration <= 0.01:
-    #             continue
-
-    #         if word_duration > 2.0:
-    #             continue
-
-    #         timestamps.append({
-    #             "word": word,
-    #             "start": float(start),
-    #             "end": float(end),
-    #         })
-
-    # expected_word_count = len([
-    #     word
-    #     for word in spoken_text.split()
-    #     if normalize_word(word)
-    # ])
-
-    # timestamps = sanitize_timestamps(timestamps, duration)
-
-    # timestamp_coverage = (
-    #     len(timestamps) / expected_word_count
-    #     if expected_word_count > 0
-    #     else 0
-    # )
-
-    # print(
-    #     "[TTS TIMESTAMP DEBUG]",
-    #     {
-    #         "audio_duration": round(duration, 2),
-    #         "expected_words": expected_word_count,
-    #         "timestamp_words": len(timestamps),
-    #         "coverage": round(timestamp_coverage, 2),
-    #         "whisper_text": transcript_data.get("text", ""),
-    #     },
-    # )
-
-    # # Always use the original spoken text for subtitle words.
-    # # Whisper can mishear numbers such as Phase 1, Phase 2, and Phase 3.
-    # timestamps = create_fallback_timestamps(
-    #     spoken_text,
-    #     duration,
-    # )
-
-    # return {
-    #     "audio": base64.b64encode(
-    #         audio_bytes,
-    #     ).decode("utf-8"),
-    #     "timestamps": timestamps,
-    # }
-
     timestamps = create_fallback_timestamps(
         spoken_text,
         duration,
@@ -1312,107 +1232,6 @@ async def rag_chat(request: ChatRequestHistory):
 
     if preprocess.route != "clinical_trials_education":
         print("PREPROCESS ROUTE IS NOT CLINICAL TRIAL EDUCATION RELATED", preprocess)
-
-        # route_responses = {
-        #     "personal_medical_advice": {
-        #         "answer": (
-        #             "I can’t give medical advice or tell you what treatment is best for you. "
-        #             "That depends on your health and should be discussed with your cancer care team. "
-        #             "Jordan can help you save this as a question to ask your doctor."
-        #         ),
-        #         "talking_points": [
-        #             "Ask your care team",
-        #             "Save this question",
-        #             "Discuss your options",
-        #         ],
-        #         "sources": [
-        #             {
-        #                 "id": 0,
-        #                 "source": "NCI",
-        #                 "title": "Questions to Ask Your Doctor About Treatment",
-        #                 "type": "support_resource",
-        #                 "url": "https://www.cancer.gov/about-cancer/coping/questions",
-        #                 "file": None,
-        #                 "chunk_id": None,
-        #                 "score": 1.0,
-        #                 "content": "A guide to help patients prepare questions for their cancer care team.",
-        #                 "relevance_explanation": "This can help you prepare questions for your doctor instead of making treatment decisions here.",
-        #             }
-        #         ],
-        #     },
-        #     "trial_recommendation_or_eligibility": {
-        #         "answer": (
-        #             "I can’t tell you if a specific clinical trial is right for you or if you qualify. "
-        #             "Eligibility depends on many personal health details. "
-        #             "Jordan can help you prepare questions about what doctors look at."
-        #         ),
-        #         "talking_points": [
-        #             "Eligibility depends on health",
-        #             "Ask what doctors check",
-        #             "Prepare trial questions",
-        #         ],
-        #         "sources": [
-        #             {
-        #                 "id": 0,
-        #                 "source": "NCI",
-        #                 "title": "Questions to Ask Your Doctor About Treatment",
-        #                 "type": "support_resource",
-        #                 "url": "https://www.cancer.gov/about-cancer/coping/questions",
-        #                 "file": None,
-        #                 "chunk_id": None,
-        #                 "score": 1.0,
-        #                 "content": "A guide to help patients prepare questions for their cancer care team.",
-        #                 "relevance_explanation": "This can help you prepare questions for your doctor instead of making treatment decisions here.",
-        #             }
-        #         ],
-        #     },
-        #     "political_or_policy": {
-        #         "answer": (
-        #             "I’m here to help explain clinical trials, not discuss political opinions or policy debates. "
-        #             "Jordan can help you learn about participant protections, like informed consent, IRBs, and safety rules."
-        #         ),
-        #         "talking_points": [
-        #             "Stay focused on trials",
-        #             "Learn participant protections",
-        #             "Ask about safety rules",
-        #         ],
-        #         "sources": [
-        #             {
-        #                 "id": 0,
-        #                 "source": "HHS",
-        #                 "title": "About Research Participation",
-        #                 "type": "support_resource",
-        #                 "url": "https://www.hhs.gov/ohrp/education-and-outreach/about-research-participation/index.html",
-        #                 "file": None,
-        #                 "chunk_id": None,
-        #                 "score": 1.0,
-        #                 "content": "Information about research participation, rights, consent, and protections.",
-        #                 "relevance_explanation": "This helps redirect policy questions toward participant rights and safety protections.",
-        #             }
-        #         ],
-        #     },
-        #     "unrelated": {
-        #         "answer": (
-        #             "I’m here to help with questions about clinical trials. "
-        #             "Jordan can help bring us back to your goals and suggest a question you may want to ask next."
-        #         ),
-        #         "talking_points": [
-        #             "Return to your goals",
-        #             "Ask about trials",
-        #             "Jordan can suggest questions",
-        #         ],
-        #     },
-        # }
-
-        # fallback = route_responses.get(preprocess.route, route_responses["unrelated"])
-
-        # return {
-        #     "answer": fallback["answer"],
-        #     "sources": [],
-        #     "confidence": 1.0,
-        #     "talking_points": fallback["talking_points"],
-        # }
-    
     
     # 1. Get RAG results
     results = rag.retrieve(preprocess.search_query, k=8)
@@ -1746,29 +1565,39 @@ def validate_jordan_turn_update_v2(
 
     returned_theme_ids = {theme.id for theme in parsed.themes}
 
-    # --- Repair: re-attach any existing themes the model dropped ---
-    missing_theme_ids = existing_theme_ids - returned_theme_ids
-    for missing_id in missing_theme_ids:
-        print("*** JORDAN V2 REPAIR: re-adding dropped theme", missing_id)
-        parsed.themes.append(existing_theme_lookup[missing_id])
-
-    # --- Repair: re-attach any existing details the model dropped ---
+    # --- Repair: preserve existing details even when themes are merged ---
     returned_detail_ids = {
-        detail.id for theme in parsed.themes for detail in theme.details
+        detail.id
+        for theme in parsed.themes
+        for detail in theme.details
     }
+
     missing_detail_ids = existing_detail_ids - returned_detail_ids
+
     for missing_id in missing_detail_ids:
-        print("*** JORDAN V2 REPAIR: re-adding dropped detail", missing_id)
-        theme_id, detail = existing_detail_lookup[missing_id]
+        print("*** JORDAN V2 REPAIR: restoring dropped detail", missing_id)
+
+        original_theme_id, detail = existing_detail_lookup[missing_id]
+
+        # Prefer its original theme when that theme still exists.
         target_theme = next(
-            (t for t in parsed.themes if t.id == theme_id), None
+            (
+                theme
+                for theme in parsed.themes
+                if theme.id == original_theme_id
+            ),
+            None,
         )
-        if target_theme is not None:
-            target_theme.details.append(detail)
-        else:
-            # Theme itself vanished and wasn't in existing_theme_ids repair
-            # (shouldn't normally happen) — fall back to original theme.
-            parsed.themes.append(existing_theme_lookup.get(theme_id) or None)
+
+        # If an existing detail disappeared and its original theme no longer
+        # exists, the model failed to preserve/reorganize the mental model.
+        if target_theme is None:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Jordan dropped existing detail {missing_id} without preserving its theme during consolidation.",
+            )
+
+        target_theme.details.append(detail)
 
     # --- Fix placeholder / empty labels instead of failing the turn ---
     for theme in parsed.themes:
@@ -1776,7 +1605,7 @@ def validate_jordan_turn_update_v2(
             "new theme", "untitled", "theme"
         }:
             # Derive a fallback label from the first detail's text.
-            fallback_source = theme.details[0].text if theme.details else theme.summary
+            fallback_source = theme.details[0].text if theme.details else theme.takeaway
             fallback_label = (fallback_source or "General concern")[:40].strip()
             print(
                 "*** JORDAN V2 REPAIR: replacing placeholder label",
@@ -1784,8 +1613,8 @@ def validate_jordan_turn_update_v2(
             )
             theme.label = fallback_label
 
-        if not theme.summary or not theme.summary.strip():
-            theme.summary = (
+        if not theme.takeaway or not theme.takeaway.strip():
+            theme.takeaway = (
                 theme.details[0].text[:100] if theme.details else "Ideas related to this concern."
             )
 
@@ -1808,25 +1637,10 @@ def validate_jordan_turn_update_v2(
             unknown_details[0].id = new_detail_id
             new_details = unknown_details
         else:
-            # Truly nothing new — synthesize a minimal detail rather than 500ing.
-            print("*** JORDAN V2 REPAIR: no new detail found, synthesizing fallback")
-            fallback_theme = parsed.themes[0] if parsed.themes else None
-            fallback_detail = JordanThemeDetail(
-                id=new_detail_id,
-                text="Alex shared new information relevant to this concern.",
+            raise HTTPException(
+                status_code=500,
+                detail="Jordan did not return the required new detail.",
             )
-            if fallback_theme is not None:
-                fallback_theme.details.append(fallback_detail)
-            else:
-                parsed.themes.append(
-                    JordanTheme(
-                        id=new_theme_id,
-                        label="New consideration",
-                        summary="A new idea from Alex's latest answer.",
-                        details=[fallback_detail],
-                    )
-                )
-            new_details = [fallback_detail]
 
     elif len(new_details) > 1:
         # Duplicate new-detail ids — keep the first, rename the rest.
@@ -1839,16 +1653,32 @@ def validate_jordan_turn_update_v2(
     new_detail.source_question = request.user_question
     new_detail.source_answer = request.alex_answer
 
-    # --- Cap at 3 themes, keeping the one with the new detail ---
+    print(
+        "*** JORDAN THEME COUNT:",
+        len(parsed.themes),
+        [theme.label for theme in parsed.themes],
+    )
+
+    # --- The model must consolidate to at most 3 themes ---
     if len(parsed.themes) > 3:
-        theme_with_new_detail = next(
-            (t for t in parsed.themes if any(d.id == new_detail.id for d in t.details)),
-            None,
+        print(
+            "*** JORDAN V2 INVALID CONSOLIDATION:",
+            {
+                "theme_count": len(parsed.themes),
+                "themes": [
+                    {
+                        "id": theme.id,
+                        "label": theme.label,
+                    }
+                    for theme in parsed.themes
+                ],
+            },
         )
-        remaining = [t for t in parsed.themes if t is not theme_with_new_detail]
-        parsed.themes = (
-            ([theme_with_new_detail] if theme_with_new_detail else []) + remaining
-        )[:3]
+
+        raise HTTPException(
+            status_code=500,
+            detail="Jordan returned more than 3 themes instead of consolidating them.",
+        )
 
     # --- Drop any stray IDs that aren't recognized (instead of raising) ---
     allowed_theme_ids = existing_theme_ids | {new_theme_id} | {t.id for t in parsed.themes}
@@ -1904,7 +1734,7 @@ def _infer_concern_label(theme: JordanTheme) -> str:
 
     return "A question I'm working through"
 
-def _infer_concern_summary(theme: JordanTheme) -> str:
+def _infer_concern_takeaway(theme: JordanTheme) -> str:
     if not theme.details:
         return "Tracking something the user is trying to work out."
     source_question = theme.details[0].source_question or theme.details[0].text
@@ -1917,7 +1747,7 @@ def _infer_concern_summary(theme: JordanTheme) -> str:
 async def jordan_turn_update_v2(
     request: JordanDecisionTurnUpdateRequest,
 ):
-    print("*** IN JORDAN TURN UPDATE V2")
+    print("*** RUNNING NEW JORDAN V2 BACKEND ***")
 
     current_themes = request.current_model.themes
     recent_history = request.history[-8:]
@@ -1931,82 +1761,80 @@ async def jordan_turn_update_v2(
     )
 
     system_prompt = """
-        You are Jordan, a warm guide helping someone make sense of what they learn from Alex about clinical trial participation.
+        You are Jordan, a virtual companion helping someone make sense of what
+        they learn from Alex about clinical trial participation.
+
+        Your job is to maintain an evolving understanding of what the user
+        appears to be trying to figure out across the conversation.
 
         Each turn:
-        1. add one lasting idea from Alex's answer to the workspace;
-        2. connect it to an earlier idea only when that helps explain a larger participation concern;
-        3. write one short message showing how the information affects the user's larger decision.
+        1. Identify what new idea Alex's latest answer adds.
+        2. Decide whether it strengthens, expands, shifts, or adds a new part
+        to the understanding that was already forming.
+        3. Update the working hypothesis and themes to reflect the clearest
+        current picture.
 
-        Return the COMPLETE updated themes collection.
+        WORKING HYPOTHESIS
+        - One short sentence describing what the user appears to be trying to
+        understand across the conversation.
+        - Revise it as the conversation develops.
+        - Treat it as a hypothesis, not a certainty about the user.
 
-        THEME LABELS AND SUMMARIES
-        - Themes are the user's concerns — things they're trying to figure out in order to decide whether/how to participate — grounded in what the user has actually asked about, not textbook topic headings.
-        - A theme should read like a concern the user is holding, not a dictionary entry for a term Alex used.
-        - Base the theme on the user's own question(s), not just on whatever fact Alex happened to state.
-        - label: 2–6 words, phrased as the user's concern.
-        - summary: one sentence, at most 22 words, describing what the user is trying to work out on this concern in order to decide.
-        - Never write generic placeholders like "New Theme," "Untitled," or "Theme 1."
-        - When adding a detail to an EXISTING theme, keep its label/summary unless the new detail shows the concern is broader or different than first captured — then refine the wording, but keep it framed as the user's concern.
-        - When creating a NEW theme, base the label/summary on what the user was actually asking about, filtered through what that means for their decision — not just the raw content of Alex's answer.
-        
-        WORKSPACE
-        - Keep at most 3 themes.
-        - If 3 themes already exist, you MUST place the new detail into one of those existing themes.
-        - Never remove an existing theme or detail.
-        - Return every existing theme and detail unchanged, plus exactly one new detail.
-        - Themes should represent concerns someone may weigh when considering participation, not textbook categories.
-        - Add exactly one new detail on every turn.
-        - Preserve all existing theme and detail IDs.
-        - Use only the provided new IDs for new content.
-        - Add to an existing theme when the idea fits.
-        - Create a new theme only when needed.
-        - Choose the idea from Alex's answer that is most useful for evaluating participation.
-        - The new detail must contain only information Alex stated.
+        THEMES
+        - Keep at most 3.
+        - Themes are broad parts of the user's developing understanding, not
+        individual questions or answers.
+        - Combine related information when it contributes to the same larger idea.
+        - Create a new theme only when the information introduces a genuinely
+        different part of the picture.
+        - Never discard previously learned information just to stay under the
+        3-theme limit.
+        - If 3 themes already exist and new information introduces another idea,
+        merge or rename related themes so important earlier understanding remains
+        represented.
+        - When themes are merged, preserve their existing details.
+        - Keep labels to 2–5 words.
+        - The takeaway should synthesize the current understanding of that theme
+        in one sentence.
+        - Returning fewer themes is allowed only when themes are meaningfully merged.
+        - If you remove an existing theme, all of its details must be moved into
+        another returned theme whose label and takeaway are updated to represent them.
+        - Never place unrelated details into a theme simply to reduce the theme count.
+
+        DETAILS
+        - Add exactly one new detail from Alex's latest answer.
+        - Use only information Alex explicitly stated.
+        - Keep it under 25 words.
+        - Preserve existing detail IDs and use the provided new detail ID.
         - Leave source_question and source_answer empty.
-        - The new detail's text must be no more than 25 words.
 
-        CONNECTION
-        Create latest_connection only when the new idea:
-        - clarifies another part of the same concern;
-        - shows a tradeoff or dependency;
-        - separates ideas that could be confused;
-        - or distinguishes general information from what depends on a specific trial.
+        JORDAN MESSAGE
+        - One conversational sentence under 35 words.
+        - Look across the working hypothesis, themes, and conversation — not just
+        Alex's latest answer.
+        - Briefly say what seems to be taking shape in the user's understanding.
+        - When useful, point out ONE meaningful piece that still seems missing
+        or underexplored from that picture.
+        - Prefer gaps or open threads that have already appeared in Alex's answers
+        or the conversation but have not been explored further.
+        - Only surface a gap if it is a general clinical-trial topic Alex could
+        reasonably explain. Do not surface gaps that require information about
+        a specific trial or the user's personal situation.
+        - Do not introduce an unrelated topic simply because the user has not
+        discussed it.
+        - If there is no meaningful gap, simply give a brief read on how the
+        understanding is coming together.
+        - Do not phrase the gap as a question or tell the user what they should ask.
+        - Do not simply summarize Alex's latest answer.
+        - Do not mention themes, the workspace, or update types.
 
-        Do not connect ideas only because they share a topic.
-        Return null when there is no meaningful connection.
+        Do not add outside facts, medical advice, eligibility judgments, or
+        participation recommendations. Jordan may notice gaps in the information,
+        but must not fill those gaps with information Alex has not provided.
 
-        MESSAGE
-        Write no more than 25 words, ideally 1 short sentence.
-
-        Perform one useful sensemaking move:
-        - break a broad concern into smaller decision questions;
-        - separate two meanings or concerns;
-        - connect multiple questions to one larger concern;
-        - or distinguish what is generally known from what must be checked for a specific trial.
-
-        Do not merely repeat Alex's answer.
-        Do not always suggest another topic.
-        Suggest one next direction only when it clearly helps with the larger concern.
-
-        You may use the user's question to understand their concern, but not as factual evidence.
-        Use only Alex's answer and the existing workspace details as factual sources.
-
-        Do not:
-        - give medical advice;
-        - recommend a trial or treatment;
-        - judge eligibility;
-        - ask for personal health information;
-        - add outside facts;
-        - claim the user believes something;
-        - mention IDs, notes, stored data, turns, or the system.
-
-        GUIDANCE TYPE
-        Choose the best fit:
-        - make_more_specific
-        - different_perspective
-        - related_idea
-        """
+        Return the complete updated themes collection.
+        Return latest_connection as null.
+    """
 
     user_content = f"""
         NEW THEME ID:
@@ -2026,6 +1854,9 @@ async def jordan_turn_update_v2(
         ALEX ANSWER SCOPE:
         {request.alex_answer_scope.value}
 
+        CURRENT WORKING HYPOTHESIS:
+        {request.current_model.working_hypothesis}
+
         CURRENT THEMES:
         {json.dumps(
             [
@@ -2041,12 +1872,6 @@ async def jordan_turn_update_v2(
                 turn.model_dump()
                 for turn in recent_history
             ],
-            ensure_ascii=False,
-        )}
-
-        PREVIOUS GUIDANCE TYPES:
-        {json.dumps(
-            request.previous_guidance_types[-5:],
             ensure_ascii=False,
         )}
 

@@ -3,7 +3,6 @@ import json
 import re
 from pydantic import ValidationError
 from typing import Any, Callable, Literal, Optional
-from fastapi.responses import StreamingResponse
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from difflib import SequenceMatcher
@@ -72,6 +71,70 @@ class JordanAfter(BaseModel):
     knowledge_gaps: list[str] = Field(default_factory=list)
 
 # -------------------------------------------------------------------
+# THEORY OF MIND (TOM) ATTEMPT
+# -------------------------------------------------------------------
+JordanResponseMove = Literal[
+    "form_hypothesis",
+    "strengthen_hypothesis",
+    "revise_hypothesis",
+    "connect_to_goal",
+    "identify_missing_piece",
+    "acknowledge_uncertainty",
+]
+
+
+class JordanToMUpdate(BaseModel):
+    assumed_beliefs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the user appears to currently believe, understand, "
+            "assume, or question based only on the conversation."
+        ),
+    )
+
+    assumed_desires: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the user appears to want to understand, determine, "
+            "or accomplish through the conversation."
+        ),
+    )
+
+    assumed_intention: str = Field(
+        description=(
+            "What the user appears to be trying to accomplish through "
+            "their current question or reasoning move."
+        )
+    )
+
+    confidence: Literal["low", "medium", "high"] = Field(
+        description=(
+            "How strongly the conversation supports Jordan's assumptions."
+        )
+    )
+
+    response_move: JordanResponseMove = Field(
+        description=(
+            "The single conversational move Jordan should make based on "
+            "the inferred user state."
+        )
+    )
+
+    working_hypothesis: str = Field(
+        description=(
+            "Jordan's concise, provisional hypothesis about the larger "
+            "question the user may be trying to resolve."
+        )
+    )
+
+    message: str = Field(
+        description=(
+            "Jordan's brief spoken response, generated from the inferred "
+            "user state and selected response move. This must never be empty"
+        )
+    )
+
+# -------------------------------------------------------------------
 # SOURCE BASE MODELS
 # -------------------------------------------------------------------
 
@@ -103,13 +166,6 @@ class AdaptiveChatTurn(BaseModel):
     role: Literal["user", "alex", "jordan"]
     content: str
 
-
-class AdaptiveChatRequest(BaseModel):
-    message: str
-    history: list[AdaptiveChatTurn] = Field(default_factory=list)
-    mental_model: str | None = None
-    knowledge_gaps: list[str] = Field(default_factory=list)
-
 class RouteResult(BaseModel):
     route: Literal["fact_finding", "hypothesis_testing"]
     reason: str
@@ -118,23 +174,6 @@ class RouteResult(BaseModel):
 class JordanFrame(BaseModel):
     message: str
     information_need: str
-
-class AdaptiveChatResponse(BaseModel):
-    route: Literal["fact_finding", "hypothesis_testing"]
-    jordan_before: Optional[str] = None
-    information_need: str
-    search_query: str
-    alex_answer: str
-    jordan_after: Optional[str] = None
-    mental_model: str
-
-    highlighted_text: Optional[str] = None
-    change_type: Optional[ChangeType] = None
-    knowledge_gaps: list[str] = Field(default_factory=list)
-
-    sources: list[Any] = Field(default_factory=list)
-    talking_points: list[str] = Field(default_factory=list)
-    answer_scope: AnswerScope
 
 # -------------------------------------------------------------------
 # RESPONSE MODELS
@@ -153,6 +192,7 @@ class AdaptiveRouteResponse(BaseModel):
 class AdaptiveFrameRequest(BaseModel):
     message: str
     history: list[AdaptiveChatTurn] = Field(default_factory=list)
+    single_character: bool = False
 
 
 class AdaptiveFrameResponse(BaseModel):
@@ -184,6 +224,7 @@ class AdaptiveJordanRequest(BaseModel):
     history: list[AdaptiveChatTurn] = Field(default_factory=list)
     mental_model: str | None = None
     knowledge_gaps: list[str] = Field(default_factory=list)
+    single_character: bool = False
 
 
 class AdaptiveJordanResponse(BaseModel):
@@ -388,41 +429,62 @@ def create_adaptive_router(
     async def frame_information_need(
         message: str,
         history: list[AdaptiveChatTurn],
+        single_character: bool = False,
     ) -> JordanFrame:
+
+        speaker_instruction = (
+        """
+            You are generating a follow-up reflection that Alex will speak directly.
+
+            Speak in the first person as Alex.
+            Do not refer to Alex in the third person.
+            """
+            if single_character
+            else
+            """
+            You are Jordan, a virtual companion with Theory of Mind capabilities.
+
+            Alex provides factual information from trusted health sources.
+            You do not provide new clinical trial facts.
+
+            Use context clues from the full conversation to make provisional
+            assumptions about the user's beliefs, desires, and intentions.
+
+            Use those assumptions to infer what larger question the user may
+            be trying to resolve. Your assumptions may be incorrect, so do not
+            present them as certain.
+        """
+        )
 
         messages = [
             {
                 "role": "system",
-                "content": """
-                    You are Jordan.
+                "content": f"""
+                    {speaker_instruction}
 
-                    The user is expressing an interpretation, belief, comparison, prediction,
-                    or concern.
+                    The user is expressing an interpretation, belief, comparison,
+                    prediction, or concern.
 
-                    Using the full conversation, your job is to prepare the user for Alex's search.
+                    Using the full conversation, briefly:
+                    1. acknowledge what the user is trying to determine, and
+                    2. explain what factual information will be investigated to address it.
 
-                    Your message should briefly:
-                    1. acknowledge the user is trying to determine, and
-                    2. what information we are going to look for in order to address the user's concern.
+                    The message should naturally lead into the factual answer.
 
-                    The message should naturally lead into Alex's answer.
+                    Do not:
+                    - answer the question;
+                    - add new facts;
+                    - merely acknowledge the concern.
 
-                    Do not simply acknowledge the user's concern.
-                    Do not answer the question yourself.
-                    Do not add new facts.
+                    The message must match the information_need you generate.
 
-                    The information described in your message should match the
-                    information_need you generate.
+                    Return:
+                    1. message: 1 or 2 short, plain-language sentences.
+                    2. information_need: One factual question that can be answered
+                    using the available sources.
 
-                    Return ONLY this JSON structure:
-                    {
-                    "message": "1 or 2 short sentences using plain language that explain what Alex is about to investigate and why that information will help answer the user's question."
-                    "information_need": "one factual question that Alex can answer using available sources. Do not ask the user for additional information."
-                    }
-
-                    Do not write "Jordan:".
-                    Do not include text before or after the JSON.
-                    Do not use markdown.
+                    Do not ask the user for more information.
+                    Do not write a speaker label.
                 """,
             }
         ]
@@ -849,42 +911,51 @@ def create_adaptive_router(
         alex_answer: str,
         answer_scope: AnswerScope,
         knowledge_gaps: list[str],
+        single_character: bool = False,
     ) -> JordanUnresolvedUpdate:
+        speaker_instruction = (
+            """
+            You are generating a message that Alex will speak directly.
+
+            Speak in the first person.
+            Say that you could not find enough supported information.
+            Never refer to Alex by name or in the third person.
+            """
+            if single_character
+            else
+            """
+            You are Jordan.
+
+            Explain that Alex could not find enough supported information.
+            Refer to Alex by name.
+            """
+        )
         response = await client_chat.beta.chat.completions.parse(
             model=model_name,
             messages=[
                 {
                     "role": "system",
-                    "content": """
-                        You are Jordan. Alex could not provide enough supported
-                        information to resolve the user's current question.
+                    "content": f"""
+                        {speaker_instruction}
 
-                        Your role is to keep track of what the conversation has and has not established.
-                        Alex could not provide enough supported information to answer the user's current question.
+                        Keep track of what the conversation has and has not established.
 
                         Your job is to:
-                        1. Tell the user you've noted that this question remains unanswered.
-                        2. Explain that you'll keep it in mind as the conversation continues.
-                        3. Maintain the conversation's current knowledge gaps. Preserve earlier unanswered questions unless Alex later provides enough supported information to resolve one.
+                        1. Say that the current question remains unanswered.
+                        2. Explain that it will be kept in mind as the conversation continues.
+                        3. Maintain the complete list of unresolved questions.
 
                         Do not:
-                        - speculate about the answer.
-                        - interpret why the information matters.
-                        - repeat Alex's response.
-                        - suggest what the answer might depend on unless Alex explicitly said so.
-                        - say you added something to an interface, workspace, note, or list.
+                        - answer or speculate;
+                        - introduce new facts;
+                        - repeat the factual response;
+                        - explain why the unknown matters;
+                        - mention an interface, workspace, note, or list.
 
-                        Your response should reinforce that distinguishing between what is known and what is still unknown helps build an accurate understanding.
-                        
                         For message:
                         - Write 1 or 2 short conversational sentences.
-                        - Your message should use plain language.
-                        - Tell the user you've noted that Alex couldn't answer this question with the available evidence.
-                        - Explain you'll keep this unanswered question in mind as the conversation continues.
-                        - Do not answer the question.
-                        - Do not speculate.
-                        - Do not explain why the information matters.
-                        - Do not mention interfaces, notes, workspaces, or lists.
+                        - Use plain language.
+                        - Follow the speaker instructions above.
 
                         For knowledge_gaps:
                         - Return the complete updated list.
@@ -892,7 +963,7 @@ def create_adaptive_router(
                         - Preserve earlier unresolved questions.
                         - Merge or replace duplicates.
                         - Keep at most 4 questions.
-                        - Each item must be understandable without conversation history.
+                        - Make each item understandable without conversation history.
 
                         Return only JSON matching JordanUnresolvedUpdate.
                     """,
@@ -903,7 +974,7 @@ def create_adaptive_router(
                         USER'S QUESTION:
                         {original_message}
 
-                        ALEX'S RESPONSE:
+                        FACTUAL RESPONSE:
                         {alex_answer}
 
                         ANSWER SCOPE:
@@ -934,6 +1005,7 @@ def create_adaptive_router(
         history: list[AdaptiveChatTurn],
         mental_model: str | None,
         knowledge_gaps: list[str],
+        single_character: bool = False,
     ) -> JordanAfter:
         """
         Update one evolving mental model using Alex's newest answer.
@@ -950,6 +1022,7 @@ def create_adaptive_router(
                     alex_answer=alex_answer,
                     answer_scope=answer_scope,
                     knowledge_gaps=knowledge_gaps,
+                    single_character=single_character,
                 )
 
                 return JordanAfter(
@@ -965,7 +1038,17 @@ def create_adaptive_router(
 
                 return JordanAfter(
                     message=(
-                        "I've noted that Alex couldn't find enough supported information to answer this question. We'll keep it in mind as we continue building your understanding."
+                        (
+                            "I couldn't find enough supported information to answer this question, "
+                            "so I'll keep it in mind as we continue building your understanding."
+                        )
+                        if single_character
+                        else
+                        (
+                            "I've noted that Alex couldn't find enough supported information to "
+                            "answer this question. We'll keep it in mind as we continue building "
+                            "your understanding."
+                        )
                     ),
                     mental_model=mental_model or "",
                     highlighted_text=None,
@@ -973,64 +1056,114 @@ def create_adaptive_router(
                     knowledge_gaps=knowledge_gaps,
                 )
 
+        speaker_instruction = (
+            """
+            You are Jordan, a virtual companion with Theory of Mind capabilities.
+
+            Alex provides factual information from trusted health sources. You do not provide new clinical trial facts.
+
+            Use context clues from the full conversation to assume about the user's mental state, which includes: 
+            beliefs, desires, and intentions.
+
+            Use those assumptions to determine what larger question the user
+            may be trying to resolve and what kind of response would be most helpful.
+
+            Your assumptions may be incorrect. Do not state them as certain.
+
+            Refer to Alex by name when discussing Alex's factual answer.
+            """
+            if single_character
+            else
+            """
+            You are Jordan. Your job is to maintain one evolving understanding of what
+            the user has learned about clinical trial participation.
+
+            Alex provides the factual information. Your job is to integrate each new
+            piece of information into the user's developing understanding.
+
+            Refer to Alex by name when discussing Alex's factual answer.
+            """
+        )
+
         messages = [
             {
-            "role": "system",
-            "content": """
-                You are Jordan. Your job is to maintain one evolving understanding of what the user has learned about clinical trial participation.
-                Alex provides the factual information. Your job is to integrate each new piece of information into the user's developing understanding.
+                "role": "system",
+                "content": f"""
+                    {speaker_instruction}
 
-                Do not simply summarize Alex's answer.
-                Do not introduce new facts.
-                Do not make recommendations.
-                Focus on how the new information changes, adds to, clarifies, or revises the overall understanding.
-                Explain how the new information fits into the understanding developed so far.
-                Speak like a conversation partner helping the user connect ideas.
+                    THEORY OF MIND
 
-                Return:
-                1. mental_model: The complete updated understanding after incorporating Alex's newest answer.
-                2. highlighted_text: The exact continuous phrase within mental_model that represents the most
-                meaningful new addition or revision. After writing mental_model, select highlighted_text only by copying and pasting one exact continuous substring from the completed mental_model.
-                Do not rewrite, paraphrase, add conjunctions, or change punctuation.
-                3. change_type: Choose exactly one:
-                - created: There was no previous mental model.
-                - expanded: The previous understanding is still valid, and a genuinely new consideration is now included.
-                - clarified: The same consideration remains, but it is now more specific, nuanced, or easier to understand.
-                - revised: Part of the earlier understanding is no longer the best framing and
-                has been meaningfully changed or replaced.
-                4. change_explanation: One brief, conversational explanation of how the newest information changed or built on the overall understanding.
+                    Use context from the entire conversation to infer why the user may be asking the questions they are asking.
 
-                For the first answer:
-                - Create the initial mental_model (under 25 words).
-                - Set change_type to created.
-                - Set highlighted_text to the entire mental_model because the whole
-                understanding is new.
+                    Your goal is not to interpret the latest question in isolation. Instead, continually develop and revise your understanding of the user's larger information-seeking goal.
 
-                For later answers:
-                - Revise the existing mental_model.
-                - The mental model should never be a list of facts or information
-                - The mental model should always be a cohesive main big picture
-                - Focus on the overall understanding rather than listing individual facts.
-                - It's okay to replace an earlier takeaway if a better understanding emerges.
-                - Don't simply restate Alex's latest answer.
-                - Never introduce facts that Alex didn't mention.
-                - highlighted_text should usually be a short phrase, not the entire mental_model.
-                - Select the smallest phrase that clearly represents the meaningful conceptual
-                change.
+                    Every new question is evidence.
 
-                For change_explanation:
-                - Explain how the newest information affected the overall understanding.
-                - Connect it to earlier understanding when appropriate.
-                - If this is the first piece of information, explain what it establishes.
-                - Be specific to Alex's answer.
-                - Avoid generic statements that could apply to almost any response.
+                    Ask yourself:
+                    "What larger question would best explain this conversation?"
 
-                Keep:
-                - mental_model under 55 words.
-                - change_explanation under 35 words.
+                    Sometimes more than one explanation may fit the conversation. When this happens, maintain multiple plausible interpretations rather than forcing a single conclusion.
 
-                Return only JSON matching the JordanMentalModelUpdate schema.
-            """,
+                    Treat your interpretations as working hypotheses, not facts. Revise them whenever new questions suggest a better explanation.
+
+                    WORKING HYPOTHESIS
+
+                    Maintain one or more concise working hypotheses describing the larger question(s) the user may be trying to answer.
+
+                    A working hypothesis should:
+                    - be provisional
+                    - be grounded in the conversation
+                    - focus on the user's larger information-seeking goal
+                    - not simply restate the user's latest question
+                    - not summarize the conversation
+                    - change naturally as new evidence appears
+
+
+                    JORDAN'S MESSAGE
+
+                    The message field is required. Always generate exactly one complete
+                    spoken response, even when your interpretation is uncertain.
+
+                    Respond as a conversational partner who is gradually understanding
+                    the user's information-seeking process.
+
+                    In the message:
+                    - if a pattern is emerging, say what you are beginning to notice;
+                    - if your interpretation changed, briefly explain the change;
+                    - if multiple explanations are plausible, briefly share them;
+                    - if no clear pattern exists, say that you are still unsure.
+
+                    The working_hypothesis is internal reasoning. It does not replace the
+                    spoken message and must not be copied word for word into the message.
+
+                    Your goal is not to tell the user what they should ask next.
+
+                    Instead, help them see the different directions their questions could naturally be leading.
+
+                    Avoid simply describing Alex's answer unless it meaningfully changes your interpretation of the user's larger goal.
+
+
+                    Do not:
+                    - simply summarize Alex's answer;
+                    - list the topics discussed;
+                    - repeat the working hypothesis word for word;
+                    - introduce new facts;
+                    - make recommendations;
+                    - tell the user what they should ask next;
+                    - tell the user whether to participate;
+                    - state your interpretations as certain;
+                    - say that you know what the user truly thinks or feels;
+                    - mention Theory of Mind, beliefs, desires, intentions, confidence, or response moves.
+
+
+                    Keep:
+                    - assumed_beliefs to at most 3 concise items;
+                    - assumed_desires to at most 2 concise items;
+                    - assumed_intention to one concise sentence;
+                    - message under 45 words.
+
+                    Return only JSON matching JordanToMUpdate.
+                """,
             },
             {
                 "role": "user",
@@ -1041,11 +1174,14 @@ def create_adaptive_router(
                     CURRENT USER QUESTION:
                     {original_message}
 
-                    ALEX'S NEWEST ANSWER:
+                    ALEX'S NEWEST FACTUAL ANSWER:
                     {alex_answer}
 
-                    CURRENT MENTAL MODEL:
-                    {mental_model or "(none yet — create the initial mental model)"}
+                    ANSWER SCOPE:
+                    {answer_scope}
+
+                    PREVIOUS WORKING HYPOTHESIS:
+                    {mental_model or "(none yet)"}
                 """,
             },
         ]
@@ -1054,57 +1190,58 @@ def create_adaptive_router(
             response = await client_chat.beta.chat.completions.parse(
                 model=model_name,
                 messages=messages,
-                response_format=JordanMentalModelUpdate,
+                response_format=JordanToMUpdate,
                 temperature=0,
             )
 
             update = response.choices[0].message.parsed
 
             if update is None:
-                raise ValueError("Jordan returned no mental model update.")
+                raise ValueError("Jordan returned no Theory of Mind update.")
 
-            updated_mental_model = update.mental_model.strip()
+            working_hypothesis = update.working_hypothesis.strip()
+            message = update.message.strip()
 
-            validated_highlight = validate_mental_model_highlight(
-                mental_model=updated_mental_model,
-                highlighted_text=update.highlighted_text,
-            )
-
-            print("*** PREVIOUS MENTAL MODEL:", mental_model)
-            print("*** UPDATED MENTAL MODEL:", updated_mental_model)
-            print("*** MENTAL MODEL CHANGE TYPE:", update.change_type)
-            print("*** REQUESTED HIGHLIGHT:", update.highlighted_text)
-            print("*** VALIDATED HIGHLIGHT:", validated_highlight)
-            print("*** JORDAN CHANGE EXPLANATION:", update.change_explanation)
+            print("*** PREVIOUS WORKING HYPOTHESIS:", mental_model)
+            print("*** ASSUMED USER BELIEFS:", update.assumed_beliefs)
+            print("*** ASSUMED USER DESIRES:", update.assumed_desires)
+            print("*** ASSUMED USER INTENTION:", update.assumed_intention)
+            print("*** TOM CONFIDENCE:", update.confidence)
+            print("*** JORDAN RESPONSE MOVE:", update.response_move)
+            print("*** UPDATED WORKING HYPOTHESIS:", working_hypothesis)
+            print("*** JORDAN MESSAGE:", message)
 
             return JordanAfter(
-                message=update.change_explanation.strip(),
-                mental_model=updated_mental_model,
-                highlighted_text=validated_highlight,
-                change_type=update.change_type,
+                message=message,
+
+                # Temporarily send the working hypothesis through the existing
+                # mental_model field so the front end does not break.
+                mental_model=working_hypothesis,
+
+                # Retire these visually for now.
+                highlighted_text=None,
+                change_type=None,
+
                 knowledge_gaps=knowledge_gaps,
             )
 
         except Exception as error:
             print(
-                "*** JORDAN MENTAL MODEL UPDATE FAILED:",
+                "*** JORDAN THEORY OF MIND UPDATE FAILED:",
                 repr(error),
             )
 
-            # Preserve the previous understanding instead of breaking the turn.
-            fallback_model = (
+            fallback_hypothesis = (
                 mental_model
-                or alex_answer.strip()[:250]
+                or "The user's larger information goal is still taking shape."
             )
 
             return JordanAfter(
                 message=(
-                    "This gives us an initial understanding to build from."
-                    if mental_model is None
-                    else
-                    "This adds another piece to the understanding we were building."
+                    "I'm still getting a sense of what you're ultimately trying "
+                    "to understand, so I don't want to make too strong a guess yet."
                 ),
-                mental_model=fallback_model,
+                mental_model=fallback_hypothesis,
                 highlighted_text=None,
                 change_type=None,
                 knowledge_gaps=knowledge_gaps,
@@ -1112,208 +1249,6 @@ def create_adaptive_router(
 
     # ---------------------------------------------------------------
     # MAIN ORCHESTRATION ENDPOINTS
-    # ---------------------------------------------------------------
-
-    def stream_part(part: str, **data: Any) -> str:
-        """Encode one newline-delimited JSON event for the browser."""
-        return json.dumps({"part": part, **data}) + "\n"
-
-    @router.post("/chat", response_model=AdaptiveChatResponse)
-    async def adaptive_chat(
-        request: AdaptiveChatRequest,
-    ) -> AdaptiveChatResponse:
-        """Non-streaming endpoint retained for compatibility."""
-
-        print("\n*** BEGIN ADAPTIVE CHAT")
-        print("*** USER MESSAGE:", request.message)
-
-        route_result = await route_turn(
-            message=request.message,
-            history=request.history,
-        )
-        route = route_result.route
-
-        print("*** ROUTE DETERMINED:", route)
-
-        jordan_before = None
-
-        if route == "hypothesis_testing":
-            jordan_frame = await frame_information_need(
-                message=request.message,
-                history=request.history,
-            )
-            jordan_before = jordan_frame.message
-            information_need = jordan_frame.information_need
-        else:
-            information_need = request.message
-
-        print("*** INFORMATION NEED DETERMINED:", information_need)
-
-        search = await prepare_alex_search(
-            information_need=information_need,
-            history=request.history,
-        )
-
-        alex_result = await run_alex(
-            original_message=request.message,
-            information_need=information_need,
-            search_query=search["search_query"],
-            results=search["results"],
-            history=request.history,
-        )
-
-        jordan_result = await integrate_answer(
-            original_message=request.message,
-            alex_answer=alex_result["answer"],
-            answer_scope=alex_result["answer_scope"],
-            has_supported_information=alex_result[
-                "has_supported_information"
-            ],
-            history=request.history,
-            mental_model=request.mental_model,
-            knowledge_gaps=request.knowledge_gaps,
-        )
-
-        return AdaptiveChatResponse(
-            route=route,
-            jordan_before=jordan_before,
-            information_need=information_need,
-            search_query=alex_result["search_query"],
-            alex_answer=alex_result["answer"],
-            jordan_after=jordan_result.message,
-            mental_model=jordan_result.mental_model,
-            highlighted_text=jordan_result.highlighted_text,
-            change_type=jordan_result.change_type,
-            knowledge_gaps=jordan_result.knowledge_gaps,
-            sources=alex_result["sources"],
-            talking_points=alex_result["talking_points"],
-            answer_scope=alex_result["answer_scope"],
-        )
-
-    @router.post("/chat-stream")
-    async def adaptive_chat_stream(
-        request: AdaptiveChatRequest,
-    ) -> StreamingResponse:
-        """Send each completed processing stage to the browser immediately."""
-
-        async def generate():
-            try:
-                print("\n*** ADAPTIVE CHAT")
-                print("*** USER:", request.message)
-
-                route_result = await route_turn(
-                    message=request.message,
-                    history=request.history,
-                )
-                route = route_result.route
-
-                print("*** ROUTE:", route)
-
-                yield stream_part(
-                    "route",
-                    route=route,
-                    reason=route_result.reason,
-                )
-
-                jordan_before = None
-
-                if route == "hypothesis_testing":
-                    jordan_frame = await frame_information_need(
-                        message=request.message,
-                        history=request.history,
-                    )
-                    jordan_before = jordan_frame.message
-                    information_need = jordan_frame.information_need
-
-                    print("*** INFORMATION NEED:", information_need)
-
-                    yield stream_part(
-                        "information_need",
-                        information_need=information_need,
-                    )
-                    yield stream_part(
-                        "jordan_before",
-                        message=jordan_before,
-                    )
-                else:
-                    information_need = request.message
-
-                    print("*** INFORMATION NEED:", information_need)
-
-                    yield stream_part(
-                        "information_need",
-                        information_need=information_need,
-                    )
-
-                search = await prepare_alex_search(
-                    information_need=information_need,
-                    history=request.history,
-                )
-
-                yield stream_part(
-                    "search_query",
-                    search_query=search["search_query"],
-                )
-
-                alex_result = await run_alex(
-                    original_message=request.message,
-                    information_need=information_need,
-                    search_query=search["search_query"],
-                    results=search["results"],
-                    history=request.history,
-                )
-
-                yield stream_part(
-                    "alex",
-                    message=alex_result["answer"],
-                    sources=alex_result["sources"],
-                    talking_points=alex_result["talking_points"],
-                    confidence=alex_result["confidence"],
-                    answer_scope=alex_result["answer_scope"],
-                    has_supported_information=alex_result[
-                        "has_supported_information"
-                    ],
-                )
-
-                jordan_result = await integrate_answer(
-                    original_message=request.message,
-                    alex_answer=alex_result["answer"],
-                    answer_scope=alex_result["answer_scope"],
-                    has_supported_information=alex_result[
-                        "has_supported_information"
-                    ],
-                    history=request.history,
-                    mental_model=request.mental_model,
-                    knowledge_gaps=request.knowledge_gaps,
-                )
-
-                if jordan_result:
-                    yield stream_part(
-                        "jordan_after",
-                        route=route,
-                        message=jordan_result.message,
-                        mental_model=jordan_result.mental_model,
-                        highlighted_text=jordan_result.highlighted_text,
-                        change_type=jordan_result.change_type,
-                        knowledge_gaps=jordan_result.knowledge_gaps
-                    )
-
-                yield stream_part("done")
-
-            except Exception as error:
-                print("*** ADAPTIVE STREAM ERROR:", error)
-                yield stream_part("error", message=str(error))
-
-        return StreamingResponse(
-            generate(),
-            media_type="application/x-ndjson",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # ---------------------------------------------------------------
     # SEPARATED CALLS
     # ---------------------------------------------------------------
 
@@ -1345,6 +1280,7 @@ def create_adaptive_router(
         result = await frame_information_need(
             message=request.message,
             history=request.history,
+            single_character=request.single_character,
         )
 
         return AdaptiveFrameResponse(
@@ -1401,6 +1337,7 @@ def create_adaptive_router(
             history=request.history,
             mental_model=request.mental_model,
             knowledge_gaps=request.knowledge_gaps,
+            single_character=request.single_character,
         )
 
         return AdaptiveJordanResponse(
