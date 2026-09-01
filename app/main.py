@@ -1,6 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query
+from jordan_adaptation import router as jordan_adaptation_router
+from conversation_jordan import router as conversation_jordan_router
+from conversation_alex import (
+    router as conversation_alex_router,
+    configure_conversation_alex,
+)
 from logging_routes import router as log_router
 from logging_routes_pilot import router as log_router_pilot
+from logging_routes_conversation import router as logging_conversation_router
 from qualtrics import (
     get_presurvey_row_from_qualtrics,
     score_presurvey_row,
@@ -20,10 +27,9 @@ import pandas as pd
 from fastapi.middleware.cors import CORSMiddleware
 import base64
 import os, re, json, math
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 from pypdf import PdfReader
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import faiss
 import openai
 from contextlib import asynccontextmanager
@@ -275,7 +281,7 @@ def build_resource_cards(results, max_cards=3):
 
 class LocalRAG:
     def __init__(self):
-        self.index = None
+        self.index: Any = None
         self.texts: List[str] = []
         self.meta: List[Dict] = []
 
@@ -337,7 +343,7 @@ class LocalRAG:
         emb = embed_texts(all_chunks)
 
         dim = emb.shape[1]
-        index = faiss.IndexFlatIP(dim)
+        index: Any = faiss.IndexFlatIP(dim)
 
         faiss.normalize_L2(emb)
         index.add(emb)
@@ -352,7 +358,12 @@ class LocalRAG:
         if q.ndim == 1:
             q = np.expand_dims(q, axis=0)           # ensure shape is (1, dim)
         faiss.normalize_L2(q)
+
+        if self.index is None:
+            raise RuntimeError("RAG index has not been loaded")
+
         scores, ids = self.index.search(q, k)
+
         out = []
         for score, idx in zip(scores[0], ids[0]):
             if idx == -1:
@@ -477,6 +488,10 @@ QUESTION_BANK = [
 app = FastAPI()
 app.include_router(log_router)
 app.include_router(log_router_pilot, prefix="/pilot")
+app.include_router(jordan_adaptation_router)
+app.include_router(conversation_jordan_router)
+app.include_router(conversation_alex_router)
+app.include_router(logging_conversation_router)
 
 handler = Mangum(app)
 
@@ -499,9 +514,15 @@ class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
     content: str
 
+class AdaptationProfile(BaseModel):
+    user_information: list[str] = Field(default_factory=list)
+
 class ChatRequestHistory(BaseModel):
     message: str
     history: list[ChatTurn] = []
+    adaptation_profile: AdaptationProfile = Field(
+        default_factory=AdaptationProfile
+    )
 
 class ChatRequest(BaseModel):
     thread_id: str | None = None
@@ -534,17 +555,6 @@ class RAGResponseOld(BaseModel):
     answer: str       # The high-level combined synthesis
     citations: List[SourceSnippetOld] # List of specific snippets used
     confidence: float # 0.0 to 1.0
-
-class SimilarQuestionsRequest(BaseModel):
-    message: str
-    top_n: int = 3
-
-class SimilarQuestion(BaseModel):
-    question: str
-    score: float
-
-class SimilarQuestionsResponse(BaseModel):
-    similar_questions: list[SimilarQuestion]
 
 class UserInfo(BaseModel):
     userId: str
@@ -738,6 +748,10 @@ class JordanDecisionTurnUpdateRequest(BaseModel):
     previous_guidance_messages: List[str] = Field(
         default_factory=list
     )
+
+class ConversationAlexRequest(BaseModel):
+    message: str
+    history: list[ChatTurn] = []
 
 def next_jordan_theme_id(themes: List[JordanTheme]) -> str:
     highest_number = 0
@@ -1136,7 +1150,12 @@ async def preprocess_question(question, history):
 
     print("***PREPROCESS RETURNED", response.choices[0].message.parsed)
 
-    return response.choices[0].message.parsed
+    parsed = response.choices[0].message.parsed
+
+    if parsed is None:
+        raise RuntimeError("Failed to parse question preprocessing")
+
+    return parsed
 
 class RagDebugRequest(BaseModel):
     question: str
@@ -1218,6 +1237,14 @@ def clean_alex_answer(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
+
+configure_conversation_alex(
+    rag_instance=rag,
+    chat_client=client_chat,
+    model=UF_LOCAL_MODEL,
+    preprocess_func=preprocess_question,
+    clean_alex_answer_func=clean_alex_answer,
+)
 
 @app.post("/rag-chat")
 async def rag_chat(request: ChatRequestHistory):
@@ -1315,16 +1342,22 @@ async def rag_chat(request: ChatRequestHistory):
     Do not invent source IDs.
     """
     
-    chat_messages = [
+    chat_messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
     ]
 
     # Add recent conversation history
     for turn in request.history[-20:]:
-        chat_messages.append({
-            "role": turn.role,
-            "content": turn.content,
-        })
+        if turn.role == "user":
+            chat_messages.append({
+                "role": "user",
+                "content": turn.content,
+            })
+        else:
+            chat_messages.append({
+                "role": "assistant",
+                "content": turn.content,
+            })
 
     # Add current question + retrieved context
     chat_messages.append({
@@ -1352,6 +1385,9 @@ async def rag_chat(request: ChatRequestHistory):
     print("RESPONSE IS", response.choices[0].message.parsed)
 
     parsed = response.choices[0].message.parsed
+
+    if parsed is None:
+        raise RuntimeError("Failed to parse RAG response")
 
     sources = build_resource_cards(results)
 
@@ -1459,20 +1495,21 @@ For each source_explanation:
 Do not invent source IDs.
 """
 
-    chat_messages = [
-        {
-            "role": "system",
-            "content": system_prompt,
-        }
+    chat_messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_prompt},
     ]
 
     for turn in request.history[-20:]:
-        chat_messages.append(
-            {
-                "role": turn.role,
+        if turn.role == "user":
+            chat_messages.append({
+                "role": "user",
                 "content": turn.content,
-            }
-        )
+            })
+        else:
+            chat_messages.append({
+                "role": "assistant",
+                "content": turn.content,
+            })
 
     chat_messages.append(
         {
@@ -1534,6 +1571,196 @@ SEARCH QUERY:
     except Exception as error:
         print(
             "*** RAG CHAT V2 ERROR:",
+            repr(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate Alex response",
+        )
+
+@app.post("/rag-chat-v3")
+async def rag_chat_v3(
+    request: ChatRequestHistory,
+):
+    print("*** IN RAG CHAT V3")
+    print(
+        "*** ALEX ADAPTATION GUIDANCE:",
+        request.adaptation_profile.model_dump(),
+    )
+
+    question = request.message
+
+    preprocess = await preprocess_question(
+        question,
+        request.history,
+    )
+
+    print("*** RAG V3 PREPROCESS:", preprocess)
+    print("*** RAG V3 ROUTE:", preprocess.route)
+    print("*** RAG V3 SEARCH QUERY:", preprocess.search_query)
+
+    # Retrieve educational source material.
+    results = rag.retrieve(
+        preprocess.search_query,
+        k=8,
+    )
+
+    context_list = []
+
+    for i, res in enumerate(results):
+        meta = res["meta"]
+
+        context_list.append(
+            f"""
+            ID: {i}
+            SOURCE: {meta.get("source", "")}
+            TITLE: {meta.get("title", meta.get("file", ""))}
+            TYPE: {meta.get("type", "")}
+            FILE: {meta.get("file", "")}
+            URL: {meta.get("url", "")}
+            CONTENT: {res["text"]}
+            """.strip()
+                    )
+
+    context_str = "\n\n---\n\n".join(context_list)
+
+    # Build Jordan-derived guidance for Alex.
+    user_information = request.adaptation_profile.user_information
+
+    adaptation_text = ""
+
+    if user_information:
+        adaptation_text = "\n".join(
+            f"- {item}"
+            for item in user_information
+        )
+
+    print("USER PROFILE", adaptation_text)
+
+    system_prompt = f"""
+    You are Alex, a clinical trials educator.
+
+    Use conversation history only to understand the user's current question.
+    Use ONLY the provided context as factual evidence.
+
+    When answering, explicitly mention something in the user information below to tailor your response to be unique to the user's situation.
+    Only skip this you can't find any information below that's clearly relevant to your response. Here's the user information:
+    {adaptation_text if adaptation_text else "No user information yet."}
+
+    If there is no single general answer:
+    - explain briefly why it varies
+    - give useful supported information
+    - identify what would need to be checked for a specific trial
+
+    Do not ask for personal health information.
+    Do not recommend a trial, judge eligibility, choose treatment, or give medical advice.
+
+    Choose one answer_scope:
+    - general_answer
+    - varies_by_trial
+    - personalized_decision
+    - insufficient_context
+
+    Write one conversational paragraph under 90 words.
+    Do not use headings, lists, citations, source names, or line breaks.
+
+    Return:
+    1. answer
+    2. source_explanations
+    3. confidence
+    4. talking_points
+    5. answer_scope
+
+    For talking_points:
+    - return at most 3
+    - each should be 4–9 words
+    - keep them in answer order
+
+    For source_explanations:
+    - use exact source IDs
+    - include only sources that directly support the answer
+    - briefly explain why each source helped
+
+    Do not invent source IDs.
+    """
+
+    chat_messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_prompt},
+    ]
+
+    for turn in request.history[-20:]:
+        if turn.role == "user":
+            chat_messages.append({
+                "role": "user",
+                "content": turn.content,
+            })
+        else:
+            chat_messages.append({
+                "role": "assistant",
+                "content": turn.content,
+            })
+
+    chat_messages.append(
+        {
+            "role": "user",
+            "content": f"""
+            CONTEXT:
+            {context_str}
+
+            CURRENT USER QUESTION:
+            {question}
+
+            PREPROCESS ROUTE:
+            {preprocess.route}
+
+            SEARCH QUERY:
+            {preprocess.search_query}
+            """.strip(),
+        }
+    )
+
+    try:
+        response = await client_chat.beta.chat.completions.parse(
+            model=UF_LOCAL_MODEL,
+            messages=chat_messages,
+            temperature=0,
+            response_format=RAGResponseV2,
+        )
+
+        parsed = response.choices[0].message.parsed
+
+        if parsed is None:
+            raw_content = response.choices[0].message.content
+
+            print(
+                "*** RAG CHAT V3 PARSE FAILED:",
+                raw_content,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to parse Alex response",
+            )
+
+        print("*** RAG CHAT V3 RESPONSE:", parsed)
+
+        sources = build_resource_cards(results)
+
+        return {
+            "answer": clean_alex_answer(parsed.answer),
+            "sources": sources,
+            "confidence": parsed.confidence,
+            "talking_points": parsed.talking_points or [],
+            "answer_scope": parsed.answer_scope.value,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            "*** RAG CHAT V3 ERROR:",
             repr(error),
         )
 
@@ -2404,18 +2631,6 @@ async def evaluate_goal_progress(request: GoalEvalRequest):
 
     return parsed
 
-@app.post("/similar-questions")
-async def similar_questions(request: SimilarQuestionsRequest):
-    user_embedding = np.array(get_embedding(request.message))
-    scores = cosine_similarity([user_embedding], bank_embeddings)[0]
-    top_indices = np.argsort(scores)[::-1][:request.top_n]
-    return SimilarQuestionsResponse(
-        similar_questions=[
-            SimilarQuestion(question=QUESTION_BANK[i], score=round(float(scores[i]), 4))
-            for i in top_indices
-        ]
-    )
-
 class PersonaMessage(BaseModel):
     response: str = Field(description="Response in first person language.")
     wordCount: int = Field(description="Number of words in response")
@@ -2596,11 +2811,17 @@ async def personas(request: UserInfo):
         
         # 3. Access the strongly typed, validated Pydantic object
         parsed_response = response.choices[0].message.parsed
-        
+
+        if parsed_response is None:
+            raise RuntimeError("Failed to parse persona response")
+
         print("PARSED RESPONSE OBJECT:", parsed_response)
-        
-        # Turn the object back into a clean list of dictionaries (an array) for your API reply
-        personas_array = [persona.model_dump() for persona in parsed_response.personas]
+
+        personas_array = [
+            persona.model_dump()
+            for persona in parsed_response.personas
+        ]
+
         generated_personas = personas_array
         return {"reply": personas_array}
         
