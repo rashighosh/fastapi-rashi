@@ -55,9 +55,6 @@ class ConversationAlexRequest(BaseModel):
     earlier_memory: str | None = None
     prior_topic_summaries: list = Field(default_factory=list)
 
-class ConversationTopicIntroRequest(BaseModel):
-    topic: str
-
 class AlexResponse(BaseModel):
     answer: str
 
@@ -505,16 +502,3 @@ async def conversation_alex(request: ConversationAlexRequest):
             status_code=500,
             detail="Could not generate Alex response",
         )
-
-@router.post("/conversation-topic-intro")
-async def conversation_topic_intro(
-    request: ConversationTopicIntroRequest
-):
-    factual_content = await generate_topic_factual_content(
-        request.topic
-    )
-
-    return {
-        "topic": request.topic,
-        "factual_content": factual_content,
-    }
