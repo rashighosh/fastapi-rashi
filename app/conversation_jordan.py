@@ -289,7 +289,7 @@ async def generate_jordan_response(
         You are now in an open-ended wrap-up discussion about clinical trial participation.
 
         EARLIER CONVERSATION MEMORY:
-        {state["wrapup_rolling_summary"] or "None yet."}
+        {earlier_memory or "None yet."}
         """
 
     else:
@@ -402,7 +402,7 @@ async def generate_jordan_after_alex(
         You are now in an open-ended wrap-up discussion about clinical trial participation.
 
         EARLIER CONVERSATION MEMORY:
-        {state["wrapup_rolling_summary"] or "None yet."}
+        {earlier_memory or "None yet."}
         """
     else:
         current_topic = get_current_topic(state)
@@ -719,67 +719,89 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     state = get_state(request.participant_id)
 
+    pending_task = pending_summary_tasks.get(request.participant_id)
+
+    if pending_task:
+        await pending_task
+
     # WRAP-UP PHASE:
     # The selected topics are complete, but Jordan and Alex can continue
     # discussing anything else the user wants to explore.
     if state.get("phase") == "wrapup":
+
+        shared_memory = state.get("wrapup_rolling_summary")
+
+        unsummarized_start = (
+            state["wrapup_history_start"]
+            + state["wrapup_summarized_until"]
+        )
+
+        shared_history = request.conversation_history[
+            unsummarized_start:
+        ]
+
         unsummarized_chunk = get_unsummarized_chunk(
             request.conversation_history,
             state["wrapup_history_start"],
             state["wrapup_summarized_until"],
         )
 
-        wrapup_summary_task = None
+        summary_task = None
 
         if unsummarized_chunk:
-            wrapup_summary_task = asyncio.create_task(
+            summary_task = asyncio.create_task(
                 update_rolling_summary(
-                    state["wrapup_rolling_summary"],
+                    shared_memory,
                     unsummarized_chunk,
                 )
             )
 
-        wrapup_history = request.conversation_history[
-            state["wrapup_history_start"]:
-        ][-10:]
+        if summary_task:
+            async def finish_wrapup_summary():
+                try:
+                    updated_summary = await summary_task
 
-        wrapup_routing_history = (
-            unsummarized_chunk + wrapup_history
-            if unsummarized_chunk
-            else wrapup_history
+                    state["wrapup_rolling_summary"] = updated_summary
+                    state["wrapup_summarized_until"] += len(
+                        unsummarized_chunk
+                    )
+
+                except Exception as error:
+                    print(
+                        "*** WRAPUP ROLLING SUMMARY ERROR:",
+                        repr(error),
+                    )
+
+                finally:
+                    pending_summary_tasks.pop(
+                        request.participant_id,
+                        None,
+                    )
+
+            pending_summary_tasks[
+                request.participant_id
+            ] = asyncio.create_task(
+                finish_wrapup_summary()
+            )
+
+        alex_support_result = await analyze_alex_support(
+            "Open-ended wrap-up discussion about clinical trial participation",
+            request.user_message,
+            shared_history,
+            earlier_memory=shared_memory,
         )
 
-        if wrapup_summary_task:
-            alex_support_result, updated_wrapup_summary = await asyncio.gather(
-                analyze_alex_support(
-                    "Open-ended wrap-up discussion about clinical trial participation",
-                    request.user_message,
-                    wrapup_routing_history,
-                    earlier_memory=state.get("wrapup_rolling_summary"),
-                ),
-                wrapup_summary_task,
-            )
-        else:
-            alex_support_result = await analyze_alex_support(
-                "Open-ended wrap-up discussion about clinical trial participation",
-                request.user_message,
-                wrapup_routing_history,
-                earlier_memory=state.get("wrapup_rolling_summary"),
-            )
-
-        if wrapup_summary_task:
-            state["wrapup_rolling_summary"] = updated_wrapup_summary
-            state["wrapup_summarized_until"] += len(unsummarized_chunk)
-
-        # If the user's information need is already clear,
-        # Alex can answer directly.
         if alex_support_result.alex_info_needed:
             return {
                 "jordan_reply": None,
                 "alex_info_needed": True,
                 "alex_reasoning": alex_support_result.reasoning,
-                "earlier_memory": state.get("wrapup_rolling_summary"),
+
+                "shared_memory": shared_memory,
+                "shared_history": shared_history,
+
                 "prior_topic_summaries": get_completed_topic_summaries(state),
+
                 "topic_done": False,
                 "topic_advanced": False,
                 "conversation_complete": True,
@@ -788,11 +810,11 @@ async def conversation_turn(request: ConversationTurnRequest):
                 "topics": state["topics"],
             }
 
-        # Otherwise Jordan continues helping the user explore/clarify.
         jordan_result = await generate_jordan_response(
             state,
             request.user_message,
-            wrapup_history,
+            shared_history,
+            earlier_memory=shared_memory,
         )
 
         return {
@@ -806,7 +828,6 @@ async def conversation_turn(request: ConversationTurnRequest):
             "phase": state["phase"],
             "topics": state["topics"],
         }
-
     current_topic = get_current_topic(state)
 
     # Freeze the rolling memory that existed at the START of this turn.
@@ -913,22 +934,39 @@ async def conversation_turn(request: ConversationTurnRequest):
 
         current_topic = get_current_topic(state)
 
+        pending_task = pending_summary_tasks.pop(
+            request.participant_id,
+            None,
+        )
+
+        if pending_task and not pending_task.done():
+            pending_task.cancel()
+
+            try:
+                await pending_task
+            except asyncio.CancelledError:
+                pass
+
         transition_history = [
             *request.conversation_history,
             {
                 "from": "user",
-                "text": request.user_message
+                "text": request.user_message,
             }
         ]
 
-        remaining_topic_history = transition_history[
-            state["topic_history_start"] + current_topic["summarized_until"]:
+        final_topic_history = [
+            *shared_history,
+            {
+                "from": "user",
+                "text": request.user_message,
+            }
         ]
 
         topic_summary = await generate_topic_summary(
             current_topic["topic"],
-            remaining_topic_history,
-            earlier_memory=current_topic.get("rolling_summary"),
+            final_topic_history,
+            earlier_memory=shared_memory,
         )
 
         current_topic["summary"] = topic_summary.model_dump()
