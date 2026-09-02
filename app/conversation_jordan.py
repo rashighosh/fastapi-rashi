@@ -12,8 +12,8 @@ load_dotenv()
 
 # Router stuff
 router = APIRouter(
-    prefix="/conversation",
-    tags=["conversation"],
+    prefix="/jordan",
+    tags=["jordan"],
 )
 
 from conversation_alex import (
@@ -38,9 +38,20 @@ client_chat = AsyncOpenAI(
 conversation_states = {}
 pending_summary_tasks = {}
 
+# Condition info
+CONDITION_SINGLE_INFO = 1
+CONDITION_SINGLE_COMBINED = 2
+CONDITION_MULTIPLE = 3
+
+def get_conversation_speaker(state):
+    if state.get("condition") == CONDITION_SINGLE_COMBINED:
+        return "alex"
+
+    return "jordan"
+
 # Creates a new conversation state for a user
 # Includes: current topic index, if conversation is complete, and topic list
-def create_conversation_state(selected_topics):
+def create_conversation_state(selected_topics, condition):
     topics: list[dict[str, Any]] = []
 
     for i, topic in enumerate(selected_topics):
@@ -61,6 +72,7 @@ def create_conversation_state(selected_topics):
         "wrapup_rolling_summary": None,
         "wrapup_summarized_until": 0,
         "topics": topics,
+        "condition": condition,
     }
 
 # Given a current user state, get the topic they're on
@@ -137,11 +149,13 @@ class ConversationStartRequest(BaseModel):
     participant_id: str
     conversation_history: list = Field(default_factory=list)
     topic_history_start: int = 0
+    condition: int = CONDITION_MULTIPLE
 
 class ConversationTurnRequest(BaseModel):
     participant_id: str
     user_message: str
     conversation_history: list = Field(default_factory=list)
+    condition: int = CONDITION_MULTIPLE
 
 class JordanTurnResult(BaseModel):
     reply: str
@@ -157,6 +171,7 @@ class JordanAfterAlexRequest(BaseModel):
 class PrepareNextTopicRequest(BaseModel):
     participant_id: str
     conversation_history: list = Field(default_factory=list)
+    condition: int = CONDITION_MULTIPLE
 
 class TopicCompletionResult(BaseModel):
     topic_done: bool
@@ -171,6 +186,7 @@ class TopicSummaryResult(BaseModel):
 class TopicSelectionRequest(BaseModel):
     participant_id: str
     selected_topics: list[str]
+    condition: int = CONDITION_MULTIPLE
 
 def clean_jordan_reply(text: str) -> str:
     return re.sub(
@@ -208,15 +224,32 @@ def extract_json_object(text: str) -> dict:
 async def generate_jordan_wrapup_intro(
     state,
     conversation_history,
+    speaker="jordan",
 ):
     topics_covered = [
         topic["topic"]
         for topic in state["topics"]
     ]
 
+    if speaker == "alex":
+        identity = (
+            "You are Alex, a virtual character helping a user talk through their "
+            "thoughts about clinical trial participation."
+        )
+        factual_support = (
+            "Make clear that factual information can be provided when helpful."
+        )
+    else:
+        identity = (
+            "You are Jordan, a virtual companion helping a user talk through their "
+            "thoughts about clinical trial participation."
+        )
+        factual_support = (
+            "Make clear that Alex can provide factual information when helpful."
+        )
+
     system_prompt = f"""
-    You are Jordan, a virtual companion helping a user talk through their
-    thoughts about clinical trial participation.
+    {identity}
 
     The user has now finished discussing all three of their selected topics.
 
@@ -231,8 +264,10 @@ async def generate_jordan_wrapup_intro(
       about clinical trial participation.
     - They may have another question, concern, belief, or thought they want
       to explore.
-    - Make clear that Alex can provide factual information when helpful.
-    - Do not provide factual clinical trial information yourself.
+    - {factual_support}
+    - Let the user know that if they are finished with the conversation, they can
+    use the Finish button in the top-right corner of their screen.
+    - Do not provide factual clinical trial information in this response.
 
     RESPONSE STYLE:
     - Keep your response conversational and concise.
@@ -282,6 +317,7 @@ async def generate_jordan_response(
     user_message,
     conversation_history,
     earlier_memory=None,
+    speaker="jordan",
 ):
     if state.get("phase") == "wrapup":
         conversation_context = f"""
@@ -327,20 +363,42 @@ async def generate_jordan_response(
                 "content": f"{sender}: {text}"
             })
 
+    if speaker == "alex":
+        identity = (
+            "You are Alex, a virtual character having an ongoing conversation with a user "
+            "about clinical trial participation."
+        )
+        factual_request = (
+            "Switch to your separate factual response to provide the factual information."
+        )
+        wrapup_role = (
+            "During the open-ended wrap-up discussion, refer to the support you can provide "
+            "without referring to another virtual character."
+        )
+    else:
+        identity = (
+            "You are Jordan, a virtual companion having an ongoing conversation with a user "
+            "about clinical trial participation."
+        )
+        factual_request = (
+            "Request Alex to provide the factual information."
+        )
+        wrapup_role = (
+            "During the open-ended wrap-up discussion, speak on behalf of both Jordan and "
+            "Alex when referring to the support available in the conversation. Use collective "
+            "language rather than presenting Jordan as the only character helping the user."
+        )
+
     # Jordan continues exploring the user's perspective
     system_prompt = f"""
-    You are Jordan, a virtual companion having an ongoing conversation with a user
-    about clinical trial participation.
+    {identity}
 
     CONVERSATION CONTEXT:
     {conversation_context}
 
-    Another virtual character, Alex, provides factual clinical trial information.
-
     YOUR GOAL:
     Your role is to help the user talk through and make sense of their thoughts,
-    beliefs, concerns, priorities, and questions so that, when useful, Alex can
-    provide information that is relevant to what matters to the user.
+    beliefs, concerns, priorities, and questions so that, when useful, information can be provided separately.
 
     CONVERSATION USE:
     - Continue naturally from the recent conversation and do not repeat questions already answered.
@@ -356,7 +414,7 @@ async def generate_jordan_response(
     - Help move from a broad reaction toward the underlying concern, priority, or
     information need.
     - If a clear factual question or information need emerges, do not keep probing
-    unnecessarily. Request Alex to provide the factual information.
+    unnecessarily. {factual_request}
     - If the discussion is becoming increasingly narrow, personal, hypothetical,
     or unrelated to what information would actually be useful, stop probing
     further and redirect toward what the user would want or need to know.
@@ -364,7 +422,8 @@ async def generate_jordan_response(
     unless the user's comment is necessary to understand their concern.
     - If you are in the open-ended wrap-up discussion, the user may explore any
     clinical trial participation topic that matters to them.
-    - Do not provide factual clinical trial information yourself.
+    - {wrapup_role}
+    - Do not provide factual clinical trial information in this response.
     - Ask at only one main question at a time.
 
     RESPONSE STYLE:
@@ -395,6 +454,7 @@ async def generate_jordan_after_alex(
     state,
     conversation_history,
     earlier_memory=None,
+    speaker="jordan",
 ):
     if state.get("phase") == "wrapup":
         conversation_context = f"""
@@ -419,31 +479,58 @@ async def generate_jordan_after_alex(
         {earlier_memory or "None yet."}
         """
 
+    if speaker == "alex":
+        identity = (
+            "You are Alex, a virtual character having an ongoing conversation with a user "
+            "about clinical trial participation."
+        )
+        factual_transition = (
+            "You just provided factual clinical trial information."
+        )
+        role_transition = """
+        - Use the history to understand why you just provided factual information and
+        what the conversation was about before that response.
+        - Continue naturally from the factual information you just provided.
+        """
+    else:
+        identity = (
+            "You are Jordan, a virtual companion having an ongoing conversation with a user "
+            "about clinical trial participation."
+        )
+        factual_transition = (
+            "Another virtual character, Alex, has just spoken."
+        )
+        role_transition = """
+        - Use the history to understand why Alex just spoke and what the conversation
+        was about before Alex responded.
+        - Briefly acknowledge Alex for providing the information before continuing with
+        the user. Make this feel like a natural handoff between the two characters,
+        rather than simply reacting to Alex's information as though you provided it.
+        """
+
     system_prompt = f"""
-    You are Jordan, a virtual companion having an ongoing conversation with a user
-    about clinical trial participation.
+    {identity}
 
     CONVERSATION CONTEXT:
     {conversation_context}
 
-    Another virtual character, Alex, has just spoken.
+    {factual_transition}
 
     YOUR ROLE:
     - Continue naturally from the conversation history.
-    - Use the history to understand why Alex just spoke and what the conversation
-    was about before Alex responded.
+    {role_transition}
     - Use EARLIER CONVERSATION MEMORY when relevant to avoid repeating or losing earlier context.
     - Use PRIOR TOPIC SUMMARIES only when they are relevant to the current conversation.
     - Bring the conversation back to the user's own thoughts, beliefs, concerns,
     priorities, or questions.
-    - If Alex just introduced a new topic, invite the user to share their initial
-    perspective on what Alex shared about that topic.
-    - If Alex just provided factual information in response to something the user
+    - If a new topic was just introduced, invite the user to share their initial
+    perspective on what was shared about that topic.
+    - If factual information was just provided in response to something the user
     wanted or needed to know, invite the user to react to or process that
     information and continue the existing thread.
-    - Do not repeat or re-explain Alex's information.
-    - Do not interpret what Alex's information means for the user.
-    - Do not provide factual clinical trial information yourself.
+    - Do not repeat or re-explain the factual information.
+    - Do not interpret what the factual information means for the user.
+    - Do not provide additional factual clinical trial information in this response.
     - Ask at most one main question.
 
     RESPONSE STYLE:
@@ -533,7 +620,7 @@ async def analyze_topic_completion(
     current topic or ready to move on.
 
     If the user explicitly asks to move on, continue, or confirms that they are
-    ready after Jordan asks, set needs_confirmation to false.
+    ready after being asked, set needs_confirmation to false.
 
     If the user appears finished but has not clearly asked or confirmed that they
     want to move on, set needs_confirmation to true.
@@ -719,6 +806,8 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     state = get_state(request.participant_id)
 
+    speaker = get_conversation_speaker(state)
+
     pending_task = pending_summary_tasks.get(request.participant_id)
 
     if pending_task:
@@ -784,11 +873,29 @@ async def conversation_turn(request: ConversationTurnRequest):
                 finish_wrapup_summary()
             )
 
+        if state["condition"] == CONDITION_SINGLE_INFO:
+            return {
+                "jordan_reply": None,
+                "alex_reply": None,
+                "alex_info_needed": True,
+                "alex_reasoning": "",
+                "shared_memory": shared_memory,
+                "shared_history": shared_history,
+                "prior_topic_summaries": get_completed_topic_summaries(state),
+                "topic_done": False,
+                "topic_advanced": False,
+                "conversation_complete": state["conversation_complete"],
+                "current_topic_index": state["current_topic_index"],
+                "phase": state["phase"],
+                "topics": state["topics"],
+            }
+
         alex_support_result = await analyze_alex_support(
             "Open-ended wrap-up discussion about clinical trial participation",
             request.user_message,
             shared_history,
             earlier_memory=shared_memory,
+            condition=state["condition"],
         )
 
         if alex_support_result.alex_info_needed:
@@ -815,6 +922,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             request.user_message,
             shared_history,
             earlier_memory=shared_memory,
+            speaker=speaker,
         )
 
         return {
@@ -828,6 +936,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             "phase": state["phase"],
             "topics": state["topics"],
         }
+    
     current_topic = get_current_topic(state)
 
     # Freeze the rolling memory that existed at the START of this turn.
@@ -884,39 +993,64 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     print("==================================\n")
 
-    # 1. Run the two routing decisions at the same time.
-    # Both use the exact same frozen shared context for this turn.
-    topic_completion_result, alex_support_result = await asyncio.gather(
-        analyze_topic_completion(
+    # 1. Run the routing decisions.
+    # c=1 only needs topic completion.
+    # c=2/c=3 run topic completion and Alex-support routing concurrently.
+    if state["condition"] == CONDITION_SINGLE_INFO:
+        topic_completion_result = await analyze_topic_completion(
             state,
             request.user_message,
             shared_history,
             earlier_memory=shared_memory,
-        ),
-        analyze_alex_support(
-            current_topic["topic"],
-            request.user_message,
-            shared_history,
-            earlier_memory=shared_memory,
-        ),
-    )
+        )
+
+        alex_info_needed = True
+        alex_reasoning = ""
+
+    else:
+        topic_completion_result, alex_support_result = await asyncio.gather(
+            analyze_topic_completion(
+                state,
+                request.user_message,
+                shared_history,
+                earlier_memory=shared_memory,
+            ),
+            analyze_alex_support(
+                current_topic["topic"],
+                request.user_message,
+                shared_history,
+                earlier_memory=shared_memory,
+                condition=state["condition"],
+            ),
+        )
+
+        alex_info_needed = alex_support_result.alex_info_needed
+        alex_reasoning = alex_support_result.reasoning
 
     # 2. If they seem finished but did not explicitly ask to move on,
-    # have Jordan confirm first
+    # confirm before advancing.
     if (
         topic_completion_result.topic_done
         and topic_completion_result.needs_confirmation
     ):
         current_topic = get_current_topic(state)
 
-        jordan_reply = (
+        confirmation_reply = (
             "It sounds like you may be good with this topic for now. "
             "Are you ready to move on?"
         )
 
         return {
-            "jordan_reply": jordan_reply,
-            "alex_reply": None,
+            "jordan_reply": (
+                None
+                if state["condition"] == CONDITION_SINGLE_INFO
+                else confirmation_reply
+            ),
+            "alex_reply": (
+                confirmation_reply
+                if state["condition"] == CONDITION_SINGLE_INFO
+                else None
+            ),
             "alex_info_needed": False,
             "alex_reasoning": "",
             "topic_done": False,
@@ -1002,14 +1136,25 @@ async def conversation_turn(request: ConversationTurnRequest):
 
         wrapup_intro_history = transition_history[-10:]
 
-        jordan_result = await generate_jordan_wrapup_intro(
-            state,
-            wrapup_intro_history,
-        )
+        if state["condition"] == CONDITION_SINGLE_INFO:
+            alex_reply = (
+                "We've finished your three selected topics. "
+                "You can ask me any other questions you have about clinical trial participation, "
+                "or use the Finish button when you're done."
+            )
+            jordan_reply = None
+        else:
+            jordan_result = await generate_jordan_wrapup_intro(
+                state,
+                wrapup_intro_history,
+                speaker=speaker,
+            )
+            alex_reply = None
+            jordan_reply = jordan_result.reply
 
         return {
-            "alex_reply": None,
-            "jordan_reply": jordan_result.reply,
+            "alex_reply": alex_reply,
+            "jordan_reply": jordan_reply,
             "alex_info_needed": False,
             "alex_reasoning": "",
             "topic_done": True,
@@ -1023,13 +1168,12 @@ async def conversation_turn(request: ConversationTurnRequest):
             "topics": state["topics"],
         }
 
-    # 3. If the information need is already clear,
-    # Alex can respond directly without a Jordan handoff.
-    if alex_support_result.alex_info_needed:
+    # 3. Decide whether Alex should respond.
+    if alex_info_needed:
         return {
             "jordan_reply": None,
             "alex_info_needed": True,
-            "alex_reasoning": alex_support_result.reasoning,
+            "alex_reasoning": alex_reasoning,
 
             "shared_memory": shared_memory,
             "shared_history": shared_history,
@@ -1043,7 +1187,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             "phase": state["phase"],
             "topics": state["topics"],
         }
-
+    
     # 4. Otherwise, Jordan continues helping the user clarify
     # their perspective or information need.
     jordan_result = await generate_jordan_response(
@@ -1051,12 +1195,13 @@ async def conversation_turn(request: ConversationTurnRequest):
         request.user_message,
         shared_history,
         earlier_memory=shared_memory,
+        speaker=speaker,
     )
 
     return {
         "jordan_reply": jordan_result.reply,
         "alex_info_needed": False,
-        "alex_reasoning": alex_support_result.reasoning,
+        "alex_reasoning": alex_reasoning,
         "topic_done": False,
         "topic_advanced": False,
         "conversation_complete": state["conversation_complete"],
@@ -1069,6 +1214,9 @@ async def conversation_turn(request: ConversationTurnRequest):
 async def prepare_next_topic(request: PrepareNextTopicRequest):
 
     state = get_state(request.participant_id)
+
+    speaker = get_conversation_speaker(state)
+
     current_topic = get_current_topic(state)
 
     factual_content = await generate_topic_factual_content(
@@ -1086,6 +1234,7 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
         factual_content=factual_content,
         prior_summaries=get_completed_topic_summaries(state),
         topic_position=topic_position,
+        condition=state["condition"],
     )
 
     jordan_history = [
@@ -1095,14 +1244,19 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
         }
     ]
 
-    jordan_result = await generate_jordan_after_alex(
-        state,
-        jordan_history,
-    )
+    if state["condition"] == CONDITION_SINGLE_INFO:
+        jordan_reply = None
+    else:
+        jordan_result = await generate_jordan_after_alex(
+            state,
+            jordan_history,
+            speaker=speaker,
+        )
+        jordan_reply = jordan_result.reply
 
     return {
         "alex_reply": alex_result.reply,
-        "jordan_reply": jordan_result.reply,
+        "jordan_reply": jordan_reply,
     }
 
 @router.post("/after-alex")
@@ -1110,10 +1264,13 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
 
     state = get_state(request.participant_id)
 
+    speaker = get_conversation_speaker(state)
+
     jordan_result = await generate_jordan_after_alex(
         state,
         request.conversation_history,
         earlier_memory=request.earlier_memory,
+        speaker=speaker,
     )
 
     return {
@@ -1137,6 +1294,8 @@ async def conversation_start(request: ConversationStartRequest):
 
     state = get_state(request.participant_id)
 
+    speaker = get_conversation_speaker(state)
+
     current_topic = get_current_topic(state)
 
     # 1. Use factual content generated when topics were selected
@@ -1152,6 +1311,7 @@ async def conversation_start(request: ConversationStartRequest):
         factual_content=factual_content,
         prior_summaries=[],
         topic_position=topic_position,
+        condition=state["condition"],
     )
 
     # 3. Give Jordan Alex's opening as context
@@ -1167,14 +1327,19 @@ async def conversation_start(request: ConversationStartRequest):
     state["topic_history_start"] = request.topic_history_start
 
     # 4. Jordan continues after Alex's topic introduction
-    jordan_result = await generate_jordan_after_alex(
-        state,
-        jordan_history,
-    )
+    if state["condition"] == CONDITION_SINGLE_INFO:
+        jordan_reply = None
+    else:
+        jordan_result = await generate_jordan_after_alex(
+            state,
+            jordan_history,
+            speaker=speaker,
+        )
+        jordan_reply = jordan_result.reply
 
     return {
         "alex_reply": alex_result.reply,
-        "jordan_reply": jordan_result.reply,
+        "jordan_reply": jordan_reply,
         "current_topic_index": state["current_topic_index"],
         "conversation_complete": state["conversation_complete"],
         "phase": state["phase"],
@@ -1190,7 +1355,10 @@ async def save_selected_topics(request: TopicSelectionRequest):
             detail="Exactly 3 topics must be selected."
         )
 
-    state = create_conversation_state(request.selected_topics)
+    state = create_conversation_state(
+        request.selected_topics,
+        request.condition,
+    )
 
     conversation_states[request.participant_id] = state
 

@@ -6,9 +6,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-
-router = APIRouter()
 load_dotenv()
+
+# Router stuff
+router = APIRouter(
+    prefix="/logs",
+    tags=["logs"],
+)
 
 table_name = os.getenv("DB_TABLE_CONVERSATION")
 
@@ -49,31 +53,27 @@ def get_conn():
 
 class ConversationEnteredLog(BaseModel):
     participant_id: str = Field(min_length=1)
-
+    c: int
+    condition_name: str
 
 class SelectedTopicsLog(BaseModel):
     participant_id: str = Field(min_length=1)
     selected_topics: list[str]
 
-
 class ConversationStartedLog(BaseModel):
     participant_id: str = Field(min_length=1)
-
 
 class ConversationStateLog(BaseModel):
     participant_id: str = Field(min_length=1)
     state: dict
 
-
 class TopicCoveredLog(BaseModel):
     participant_id: str = Field(min_length=1)
     topic_number: int
 
-
 class ConversationTranscriptLog(BaseModel):
     participant_id: str = Field(min_length=1)
     transcript: str
-
 
 class ConversationFinishedLog(BaseModel):
     participant_id: str = Field(min_length=1)
@@ -87,6 +87,7 @@ class IntroFinishedLog(BaseModel):
 
 @router.post("/log-conversation-entered")
 def log_conversation_entered(body: ConversationEnteredLog):
+    print("Logging conversation entered...")
     try:
         with get_conn() as conn:
             cursor = conn.cursor()
@@ -107,12 +108,17 @@ def log_conversation_entered(body: ConversationEnteredLog):
                 cursor.execute(
                     f"""
                     UPDATE {table_name}
-                    SET entered_at = COALESCE(
-                        entered_at,
-                        {EASTERN_TIME_SQL}
-                    )
+                    SET
+                        entered_at = COALESCE(
+                            entered_at,
+                            {EASTERN_TIME_SQL}
+                        ),
+                        c = ?,
+                        condition_name = ?
                     WHERE participant_id = ?
                     """,
+                    body.c,
+                    body.condition_name,
                     body.participant_id,
                 )
 
@@ -122,11 +128,15 @@ def log_conversation_entered(body: ConversationEnteredLog):
                     INSERT INTO {table_name}
                     (
                         participant_id,
+                        c,
+                        condition_name,
                         entered_at
                     )
-                    VALUES (?, {EASTERN_TIME_SQL})
+                    VALUES (?, ?, ?, {EASTERN_TIME_SQL})
                     """,
                     body.participant_id,
+                    body.c,
+                    body.condition_name,
                 )
 
             conn.commit()
@@ -135,6 +145,8 @@ def log_conversation_entered(body: ConversationEnteredLog):
             "success": True,
             "message": "Conversation entry logged.",
             "participant_id": body.participant_id,
+            "c": body.c,
+            "condition_name": body.condition_name,
         }
 
     except Exception as exc:
@@ -144,7 +156,6 @@ def log_conversation_entered(body: ConversationEnteredLog):
             status_code=500,
             detail=f"Could not log conversation entry: {str(exc)}",
         )
-
 
 # ---------------------------------------------------------------------------
 # Selected topics

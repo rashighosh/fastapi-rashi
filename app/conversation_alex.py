@@ -4,8 +4,10 @@ import json
 import re
 from typing import Any
 
+# Router stuff
 router = APIRouter(
-    tags=["conversation-alex"],
+    prefix="/alex",
+    tags=["alex"],
 )
 
 # --------------------------------------------------------------------------
@@ -40,6 +42,10 @@ def configure_conversation_alex(
     preprocess_question = preprocess_func
     clean_alex_answer = clean_alex_answer_func
 
+# Conditions
+CONDITION_SINGLE_INFO = 1
+CONDITION_SINGLE_COMBINED = 2
+CONDITION_MULTIPLE = 3
 
 # --------------------------------------------------------------------------
 # Models
@@ -54,6 +60,7 @@ class ConversationAlexRequest(BaseModel):
     history: list[ConversationMessage] = []
     earlier_memory: str | None = None
     prior_topic_summaries: list = Field(default_factory=list)
+    condition: int = CONDITION_MULTIPLE
 
 class AlexResponse(BaseModel):
     answer: str
@@ -71,6 +78,7 @@ async def analyze_alex_support(
     user_message,
     conversation_history,
     earlier_memory=None,
+    condition=CONDITION_MULTIPLE,
 ):
     history_messages = []
 
@@ -91,6 +99,22 @@ async def analyze_alex_support(
                 "role": "assistant",
                 "content": f"{sender}: {text}",
             })
+
+    if condition == CONDITION_SINGLE_COMBINED:
+        clarification_instruction = (
+            "Otherwise, continue clarifying what information would help in the separate conversational response."
+        )
+        alex_involvement_instruction = (
+            "Do not switch to the separate factual response simply because factual information could be helpful."
+        )
+    else:
+        clarification_instruction = (
+            "Otherwise, let Jordan continue clarifying what information would help."
+        )
+        alex_involvement_instruction = (
+            "Do not involve Alex simply because factual information could be helpful."
+        )
+            
     system_prompt = f"""
     You are determining whether factual clinical trial information
     would meaningfully support the user's current message.
@@ -115,9 +139,9 @@ async def analyze_alex_support(
     information the user wants or would find useful, even if the latest message is
     brief.
 
-    Otherwise, let Jordan continue clarifying what information would help.
+    {clarification_instruction}
 
-    Do not involve Alex simply because factual information could be helpful.
+    {alex_involvement_instruction}
 
     Set reasoning to a brief explanation no more than 25 words for why you set
     alex_info_needed.
@@ -254,6 +278,7 @@ async def generate_alex_topic_intro(
     factual_content: str,
     prior_summaries: list,
     topic_position: str,
+    condition: int = CONDITION_MULTIPLE,
 ):
     if topic_position == "first":
         topic_position_guidance = (
@@ -271,11 +296,34 @@ async def generate_alex_topic_intro(
     print("***IN GENERATE ALEX TOPIC INTRO, TOPIC POSITION IS", topic_position)
     print(topic_position_guidance)
 
+    if condition == CONDITION_SINGLE_INFO:
+        conversation_transition = (
+            "You are briefly introducing the current topic to the user."
+        )
+        followup_instruction = (
+            "Do not ask the user a question."
+        )
+    elif condition == CONDITION_SINGLE_COMBINED:
+        conversation_transition = (
+            "You are briefly introducing the current topic before continuing the "
+            "conversation with the user about their own thoughts, beliefs, concerns, and priorities."
+        )
+        followup_instruction = (
+            "Do not ask the user a question. A separate conversational response will follow."
+        )
+    else:
+        conversation_transition = (
+            "You are briefly introducing the current topic before Jordan talks with the "
+            "user about their own thoughts, beliefs, concerns, and priorities."
+        )
+        followup_instruction = (
+            "Do not ask the user a question. Jordan will continue the conversation."
+        )
+
     system_prompt = f"""
     You are Alex, a clinical trials educator.
 
-    You are briefly introducing the current topic before Jordan talks with the
-    user about their own thoughts, beliefs, concerns, and priorities.
+    {conversation_transition}
 
     CURRENT TOPIC:
     {current_topic}
@@ -298,7 +346,7 @@ async def generate_alex_topic_intro(
       explicitly mention it and connect the explanation to it.
     - Do not force personalization when the earlier summary information is not relevant.
     - Do not introduce facts based on the summaries.
-    - Do not ask the user a question. Jordan will continue the conversation.
+    - {followup_instruction}
 
     RESPONSE STYLE:
     - Sound like you are introducing a topic, not answering a question.
@@ -396,7 +444,22 @@ async def conversation_alex(request: ConversationAlexRequest):
 
     context_str = "\n\n---\n\n".join(context_list)
 
-    system_prompt = """
+    if request.condition in (
+        CONDITION_SINGLE_INFO,
+        CONDITION_SINGLE_COMBINED,
+    ):
+        entry_instruction = (
+            "Naturally connect the factual response to what the user just expressed, "
+            "then provide the relevant factual information."
+        )
+    else:
+        entry_instruction = (
+            "When entering the conversation, briefly signal that you are stepping in to provide "
+            "relevant factual information. Naturally connect your response to what the user just "
+            "expressed, then give the factual explanation."
+        )
+
+    system_prompt = f"""
     You are Alex, a clinical trials educator.
 
     You are providing factual information that supports an ongoing
@@ -426,9 +489,10 @@ async def conversation_alex(request: ConversationAlexRequest):
     Explain medical terms in plain language.
     Be friendly, direct, and conversational.
 
-    Speak directly to the user as Alex. Do not use labels such as 'Alex:' or 'Jordan:'.
-    Briefly and naturally acknowledge what the user expressed before giving
-    the factual explanation.
+    {entry_instruction}
+
+    The transition should make Alex's reason for speaking clear without sounding
+    formulaic, repetitive, or like a separate announcement.
 
     Write one conversational paragraph under 75 words.
     Do not use headings, lists, citations, source names, or line breaks.
