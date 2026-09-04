@@ -104,20 +104,14 @@ async def analyze_alex_support(
         clarification_instruction = (
             "Otherwise, continue clarifying what information would help in the separate conversational response."
         )
-        alex_involvement_instruction = (
-            "Do not switch to the separate factual response simply because factual information could be helpful."
-        )
     else:
         clarification_instruction = (
             "Otherwise, let Jordan continue clarifying what information would help."
         )
-        alex_involvement_instruction = (
-            "Do not involve Alex simply because factual information could be helpful."
-        )
             
     system_prompt = f"""
-    You are determining whether factual clinical trial information
-    would meaningfully support the user's current message.
+    You are deciding whether the user currently needs NEW factual clinical trial
+    information.
 
     CURRENT TOPIC:
     {current_topic}
@@ -128,23 +122,31 @@ async def analyze_alex_support(
     USER MESSAGE:
     {user_message}
 
-    Use the earlier memory when relevant to understand the user's current information need.
+    Use the conversation history and earlier memory to understand what the user
+    means and what has already been discussed.
 
-    Set alex_info_needed to true when the user's factual information need is clear
-    enough for Alex to address without making assumptions.
+    Set alex_info_needed to true when:
+    - the user asks a factual question,
+    - the user clearly needs factual clarification,
+    - the user expresses a clear factual assumption that is shaping their
+    perspective, concern, or decision,
+    - or their concern has already been clarified and new factual information is
+    needed to address it.
 
-    Use the conversation history to interpret short or contextual user responses.
+    Set alex_info_needed to false when:
+    - the user is mainly expressing an opinion, reaction, feeling, preference,
+    hesitation, or concern,
+    - their underlying reason is still unclear and should be explored first,
+    - the relevant factual information has already been provided,
+    - or Alex would mainly repeat information already given.
 
-    Set alex_info_needed to true when the conversation makes clear what factual
-    information the user wants or would find useful, even if the latest message is
-    brief.
+    Do not involve the factual response simply because factual information could
+    be relevant. Ask whether the user currently needs NEW factual information for
+    the conversation to move forward.
 
     {clarification_instruction}
 
-    {alex_involvement_instruction}
-
-    Set reasoning to a brief explanation no more than 25 words for why you set
-    alex_info_needed.
+    Set reasoning to a brief explanation no more than 25 words.
     """
 
     try:
@@ -475,6 +477,15 @@ async def conversation_alex(request: ConversationAlexRequest):
     Respond directly to the factual question, uncertainty, assumption,
     or misunderstanding expressed by the user.
 
+    Use the conversation history and earlier memory to avoid repeating factual
+    information already provided.
+
+    Focus on NEW information that directly addresses the user's current need.
+    Do not restate the same facts simply because they are still relevant.
+
+    If part of the answer was already explained, briefly acknowledge that and
+    provide only what is new or necessary.
+
     Do not ask the user a follow-up question.
     Do not give personal medical advice.
     Do not recommend a clinical trial.
@@ -491,7 +502,7 @@ async def conversation_alex(request: ConversationAlexRequest):
 
     {entry_instruction}
 
-    The transition should make Alex's reason for speaking clear without sounding
+    The transition should make your reason for speaking clear without sounding
     formulaic, repetitive, or like a separate announcement.
 
     Write one conversational paragraph under 75 words.

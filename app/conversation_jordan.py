@@ -428,7 +428,8 @@ async def generate_jordan_response(
 
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
-    - Focus on helping identify what information would be useful to the user.
+    - Focus on understanding the user's underlying perspective, concern,
+    belief, preference, or priority in order to identify what information would be useful to the user.
     - Keep your response to 35 words or less.
     """
 
@@ -616,19 +617,21 @@ async def analyze_topic_completion(
 
     Use the earlier conversation memory only when it helps determine whether the user has already finished or resolved this topic.
 
-    Set topic_done to true when the user indicates they are finished with the
-    current topic or ready to move on.
+    Set topic_done to true only when the user clearly indicates they are finished
+    with the current topic or ready to move on.
 
-    If the user explicitly asks to move on, continue, or confirms that they are
-    ready after being asked, set needs_confirmation to false.
+    If the user explicitly asks to move on, continue, says they are done, says they
+    are good for now, or confirms they are ready after being asked, set
+    topic_done to true.
 
-    If the user appears finished but has not clearly asked or confirmed that they
-    want to move on, set needs_confirmation to true.
+    Do not infer that the user is finished simply because:
+    - they express agreement or reassurance,
+    - they make a concluding-sounding statement,
+    - one concern appears resolved,
+    - or they do not ask a question.
 
     If the user is still expressing a thought, concern, question, belief,
-    preference, or other perspective, set topic_done to false and
-    needs_confirmation to false.
-
+    preference, assumption, or other perspective, set topic_done to false.
 
     When uncertain, keep topic_done false.
 
