@@ -64,6 +64,23 @@ SCOPE BOUNDARY:
 - If the user asks you to find trials for them, stay at that general educational level.
 """
 
+NEXT_STEP_RESOURCES = """
+OPTIONAL NEXT-STEP RESOURCES:
+The following resources will be available to the user after the conversation:
+- featured examples of real clinical trials
+- personal stories from research participants
+- a sample informed consent form
+- questions to ask a doctor or research team
+- a checklist for looking for a trial
+- a guide to finding clinical trials
+- help from an NCI information specialist
+- the NCI clinical trials search tool
+
+If one of these is directly relevant to the user's current question or concern,
+you may briefly mention that it will be available after the conversation.
+Keep the mention optional and secondary to the factual answer.
+"""
+
 # --------------------------------------------------------------------------
 # Models
 # --------------------------------------------------------------------------
@@ -508,8 +525,6 @@ async def conversation_alex(request: ConversationAlexRequest):
 
     Do not ask the user a follow-up question.
     Do not give personal medical advice.
-    Do not recommend a clinical trial.
-    Do not judge whether the user would be eligible for a clinical trial.
 
     If there is no single general answer:
     - briefly explain why it varies,
@@ -526,9 +541,11 @@ async def conversation_alex(request: ConversationAlexRequest):
     formulaic, repetitive, or like a separate announcement.
 
     {TRIAL_MATCHING_BOUNDARY}
+    {NEXT_STEP_RESOURCES}
 
     Write one conversational paragraph under 75 words.
     Do not use headings, lists, citations, source names, or line breaks.
+    Do not use labels such as 'Alex:' or 'Jordan:'
     """
 
     chat_messages = [
