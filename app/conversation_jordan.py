@@ -43,6 +43,14 @@ CONDITION_SINGLE_INFO = 1
 CONDITION_SINGLE_COMBINED = 2
 CONDITION_MULTIPLE = 3
 
+TRIAL_MATCHING_BOUNDARY = """
+SCOPE BOUNDARY:
+- Do not search for, identify, match, shortlist, rank, or recommend specific clinical trials for the user.
+- Do not offer or promise that you can find or prepare a list of trials for the user.
+- Do not ask for personal details such as cancer type, stage, diagnosis, location, test results, or other eligibility information for the purpose of finding or matching trials.
+- If the user wants help finding a specific trial, keep the conversation at a general educational level rather than moving into trial matching.
+"""
+
 def get_conversation_speaker(state):
     if state.get("condition") == CONDITION_SINGLE_COMBINED:
         return "alex"
@@ -188,9 +196,9 @@ class TopicSelectionRequest(BaseModel):
     selected_topics: list[str]
     condition: int = CONDITION_MULTIPLE
 
-def clean_jordan_reply(text: str) -> str:
+def clean_character_reply(text: str) -> str:
     return re.sub(
-        r"^\s*Jordan\s*:\s*",
+        r"^\s*(?:Alex|Jordan)\s*:\s*",
         "",
         text,
         flags=re.IGNORECASE,
@@ -269,6 +277,8 @@ async def generate_jordan_wrapup_intro(
     use the Finish button in the top-right corner of their screen.
     - Do not provide factual clinical trial information in this response.
 
+    {TRIAL_MATCHING_BOUNDARY}
+
     RESPONSE STYLE:
     - Keep your response conversational and concise.
     - Keep your response to 50 words or less.
@@ -300,6 +310,7 @@ async def generate_jordan_wrapup_intro(
             {"role": "system", "content": system_prompt},
             *history_messages,
         ],
+        temperature=0,
         response_format=JordanTurnResult,
     )
 
@@ -308,7 +319,7 @@ async def generate_jordan_wrapup_intro(
     if parsed is None:
         raise RuntimeError("Failed to parse Jordan wrap-up intro")
 
-    parsed.reply = clean_jordan_reply(parsed.reply)
+    parsed.reply = clean_character_reply(parsed.reply)
     return parsed
 
 # Jordan's LLM response
@@ -426,6 +437,8 @@ async def generate_jordan_response(
     - Do not provide factual clinical trial information in this response.
     - Ask at only one main question at a time.
 
+    {TRIAL_MATCHING_BOUNDARY}
+
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
     - Focus on understanding the user's underlying perspective, concern,
@@ -440,6 +453,7 @@ async def generate_jordan_response(
             *history_messages,
             {"role": "user", "content": user_message},
         ],
+        temperature=0,
         response_format=JordanTurnResult,
     )
 
@@ -448,7 +462,7 @@ async def generate_jordan_response(
     if parsed is None:
         raise RuntimeError("Failed to parse Jordan response")
 
-    parsed.reply = clean_jordan_reply(parsed.reply)
+    parsed.reply = clean_character_reply(parsed.reply)
     return parsed
 
 async def generate_jordan_after_alex(
@@ -534,6 +548,8 @@ async def generate_jordan_after_alex(
     - Do not provide additional factual clinical trial information in this response.
     - Ask at most one main question.
 
+    {TRIAL_MATCHING_BOUNDARY}
+
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
     - Sound like you are continuing the existing conversation.
@@ -566,6 +582,7 @@ async def generate_jordan_after_alex(
             {"role": "system", "content": system_prompt},
             *history_messages,
         ],
+        temperature=0,
         response_format=JordanAfterAlexResult,
     )
 
@@ -574,7 +591,7 @@ async def generate_jordan_after_alex(
     if parsed is None:
         raise RuntimeError("Failed to parse Jordan response")
 
-    parsed.reply = clean_jordan_reply(parsed.reply)
+    parsed.reply = clean_character_reply(parsed.reply)
     return parsed
 
 async def analyze_topic_completion(
@@ -645,6 +662,7 @@ async def analyze_topic_completion(
             *history_messages,
             {"role": "user", "content": user_message},
         ],
+        temperature=0,
         response_format=TopicCompletionResult,
     )
 
@@ -715,6 +733,7 @@ async def generate_topic_summary(
             {"role": "system", "content": system_prompt},
             *history_messages,
         ],
+        temperature=0,
         response_format=TopicSummaryResult,
     )
 

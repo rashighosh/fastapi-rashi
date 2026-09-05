@@ -81,6 +81,13 @@ class ConversationFinishedLog(BaseModel):
 class IntroFinishedLog(BaseModel):
     participant_id: str = Field(min_length=1)
 
+class SelectedResourcesLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    selected_resources: list[str]
+
+class WebsiteFinishedLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+
 # ---------------------------------------------------------------------------
 # Entered conversation activity
 # ---------------------------------------------------------------------------
@@ -432,8 +439,8 @@ def log_conversation_finished(body: ConversationFinishedLog):
             cursor.execute(
                 f"""
                 UPDATE {table_name}
-                SET finished_at = COALESCE(
-                    finished_at,
+                SET finished_conversation_at = COALESCE(
+                    finished_conversation_at,
                     {EASTERN_TIME_SQL}
                 )
                 WHERE participant_id = ?
@@ -492,6 +499,9 @@ def get_conversation_data(participant_id: str):
                     selected_topic_2_covered_at,
                     selected_topic_3_covered_at,
                     conversation_transcript,
+                    finished_conversation_at,
+                    selected_resources,
+                    resources_selected_at,
                     finished_at
                 FROM {table_name}
                 WHERE participant_id = ?
@@ -508,12 +518,19 @@ def get_conversation_data(participant_id: str):
             )
 
         conversation_state = None
+        selected_resources = None
 
         if row[7]:
             try:
                 conversation_state = json.loads(row[7])
             except json.JSONDecodeError:
                 conversation_state = None
+
+        if row[13]:
+            try:
+                selected_resources = json.loads(row[13])
+            except json.JSONDecodeError:
+                selected_resources = None
 
         return {
             "entered_at": row[0],
@@ -530,7 +547,10 @@ def get_conversation_data(participant_id: str):
             "selected_topic_2_covered_at": row[9],
             "selected_topic_3_covered_at": row[10],
             "conversation_transcript": row[11],
-            "finished_at": row[12],
+            "finished_conversation_at": row[12],
+            "selected_resources": selected_resources,
+            "resources_selected_at": row[14],
+            "finished_at": row[15],
         }
 
     except HTTPException:
@@ -589,4 +609,99 @@ def log_intro_finished(body: IntroFinishedLog):
         raise HTTPException(
             status_code=500,
             detail=f"Could not log intro completion: {str(exc)}",
+        )
+
+# ---------------------------------------------------------------------------
+# Selected next-step resources
+# ---------------------------------------------------------------------------
+
+@router.post("/log-selected-resources")
+def log_selected_resources(body: SelectedResourcesLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    selected_resources = ?,
+                    resources_selected_at = {EASTERN_TIME_SQL}
+                WHERE participant_id = ?
+                """,
+                json.dumps(body.selected_resources),
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "message": "Selected resources logged.",
+            "participant_id": body.participant_id,
+            "selected_resources": body.selected_resources,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-selected-resources] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save selected resources: {str(exc)}",
+        )
+
+# ---------------------------------------------------------------------------
+# Website finished
+# ---------------------------------------------------------------------------
+
+@router.post("/log-finished")
+def log_finished(body: WebsiteFinishedLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET finished_at = COALESCE(
+                    finished_at,
+                    {EASTERN_TIME_SQL}
+                )
+                WHERE participant_id = ?
+                """,
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "message": "Website completion logged.",
+            "participant_id": body.participant_id,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-finished] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log website completion: {str(exc)}",
         )

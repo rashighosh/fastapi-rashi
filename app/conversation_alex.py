@@ -42,10 +42,27 @@ def configure_conversation_alex(
     preprocess_question = preprocess_func
     clean_alex_answer = clean_alex_answer_func
 
+def clean_character_reply(text: str) -> str:
+    return re.sub(
+        r"^\s*(?:Alex|Jordan)\s*:\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+
 # Conditions
 CONDITION_SINGLE_INFO = 1
 CONDITION_SINGLE_COMBINED = 2
 CONDITION_MULTIPLE = 3
+
+TRIAL_MATCHING_BOUNDARY = """
+SCOPE BOUNDARY:
+- Do not search for, identify, match, shortlist, rank, or recommend specific clinical trials.
+- Do not claim that you can find trials for the user.
+- Do not collect or request personal medical, location, or eligibility details for the purpose of matching the user to trials.
+- If the user asks how to find trials, you may explain general resources and people who can help.
+- If the user asks you to find trials for them, stay at that general educational level.
+"""
 
 # --------------------------------------------------------------------------
 # Models
@@ -350,6 +367,8 @@ async def generate_alex_topic_intro(
     - Do not introduce facts based on the summaries.
     - {followup_instruction}
 
+    {TRIAL_MATCHING_BOUNDARY}
+
     RESPONSE STYLE:
     - Sound like you are introducing a topic, not answering a question.
     - Keep your response to 75 words or less.
@@ -369,6 +388,7 @@ async def generate_alex_topic_intro(
     if parsed is None:
         raise RuntimeError("Failed to parse Alex topic intro")
 
+    parsed.reply = clean_character_reply(parsed.reply)
     return parsed
 
 @router.post("/conversation-alex")
@@ -504,6 +524,8 @@ async def conversation_alex(request: ConversationAlexRequest):
 
     The transition should make your reason for speaking clear without sounding
     formulaic, repetitive, or like a separate announcement.
+
+    {TRIAL_MATCHING_BOUNDARY}
 
     Write one conversational paragraph under 75 words.
     Do not use headings, lists, citations, source names, or line breaks.
