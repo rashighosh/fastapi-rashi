@@ -32,7 +32,7 @@ load_dotenv()
 useCORS = True
 
 # Endpoints allowed to access this server
-origins = ["https://main.d355vauwiio7nq.amplifyapp.com", "https://idea.d355vauwiio7nq.amplifyapp.com", "https://clinical-trial-conversation.d3mhus154b7dn6.amplifyapp.com", "http://localhost:5173", "https://ufl.qualtrics.com"]
+origins = ["https://clinical-trial-conversation.d3mhus154b7dn6.amplifyapp.com", "http://localhost:5173"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
 base_url = "https://api.ai.it.ufl.edu/v1"

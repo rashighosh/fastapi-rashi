@@ -22,6 +22,11 @@ from conversation_alex import (
     generate_topic_factual_content,
 )
 
+from logging_routes_conversation import (
+    load_conversation_state_from_db,
+    save_conversation_state_to_db,
+)
+
 # Set up LLM stuff
 BASE_URL = "https://api.ai.it.ufl.edu/v1"
 RASHI_LITELLM_KEY = os.getenv("RASHI_LITELLM_KEY")
@@ -32,11 +37,6 @@ client_chat = AsyncOpenAI(
     base_url=BASE_URL,
     timeout=45.0
 )
-
-# This holds every single participant's conversation state
-# Will clear on server restart
-conversation_states = {}
-pending_summary_tasks = {}
 
 # Condition info
 CONDITION_SINGLE_INFO = 1
@@ -90,7 +90,7 @@ def get_current_topic(state):
 
 # Given a user, create new state or grab their existing state
 def get_state(participant_id):
-    state = conversation_states.get(participant_id)
+    state = load_conversation_state_from_db(participant_id)
 
     if state is None:
         raise HTTPException(
@@ -99,6 +99,12 @@ def get_state(participant_id):
         )
 
     return state
+
+def persist_state(participant_id, state):
+    save_conversation_state_to_db(
+        participant_id,
+        state,
+    )
 
 # Marks current state as 'complete' and advances to the next topic
 def advance_topic(state):
@@ -805,6 +811,7 @@ async def update_rolling_summary(
 
 async def finish_pending_summary(
     participant_id,
+    state,
     current_topic,
     summary_task,
     chunk_size,
@@ -815,11 +822,13 @@ async def finish_pending_summary(
         current_topic["rolling_summary"] = updated_summary
         current_topic["summarized_until"] += chunk_size
 
+        persist_state(
+            participant_id,
+            state,
+        )
+
     except Exception as error:
         print("*** ROLLING SUMMARY ERROR:", repr(error))
-
-    finally:
-        pending_summary_tasks.pop(participant_id, None)
 
 # ENDPOINTS 
 
@@ -829,11 +838,6 @@ async def conversation_turn(request: ConversationTurnRequest):
     state = get_state(request.participant_id)
 
     speaker = get_conversation_speaker(state)
-
-    pending_task = pending_summary_tasks.get(request.participant_id)
-
-    if pending_task:
-        await pending_task
 
     # WRAP-UP PHASE:
     # The selected topics are complete, but Jordan and Alex can continue
@@ -857,6 +861,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             state["wrapup_summarized_until"],
         )
 
+        wrapup_summary_finish_task = None
         summary_task = None
 
         if unsummarized_chunk:
@@ -877,25 +882,25 @@ async def conversation_turn(request: ConversationTurnRequest):
                         unsummarized_chunk
                     )
 
+                    persist_state(
+                        request.participant_id,
+                        state,
+                    )
+
                 except Exception as error:
                     print(
                         "*** WRAPUP ROLLING SUMMARY ERROR:",
                         repr(error),
                     )
 
-                finally:
-                    pending_summary_tasks.pop(
-                        request.participant_id,
-                        None,
-                    )
-
-            pending_summary_tasks[
-                request.participant_id
-            ] = asyncio.create_task(
+            wrapup_summary_finish_task = asyncio.create_task(
                 finish_wrapup_summary()
             )
 
         if state["condition"] == CONDITION_SINGLE_INFO:
+            if wrapup_summary_finish_task:
+                await wrapup_summary_finish_task
+
             return {
                 "jordan_reply": None,
                 "alex_reply": None,
@@ -921,6 +926,9 @@ async def conversation_turn(request: ConversationTurnRequest):
         )
 
         if alex_support_result.alex_info_needed:
+            if wrapup_summary_finish_task:
+                await wrapup_summary_finish_task
+
             return {
                 "jordan_reply": None,
                 "alex_info_needed": True,
@@ -946,6 +954,9 @@ async def conversation_turn(request: ConversationTurnRequest):
             earlier_memory=shared_memory,
             speaker=speaker,
         )
+
+        if wrapup_summary_finish_task:
+            await wrapup_summary_finish_task
 
         return {
             "jordan_reply": jordan_result.reply,
@@ -983,6 +994,7 @@ async def conversation_turn(request: ConversationTurnRequest):
         current_topic["summarized_until"],
     )
 
+    summary_finish_task = None
     summary_task = None
 
     if unsummarized_chunk:
@@ -994,9 +1006,10 @@ async def conversation_turn(request: ConversationTurnRequest):
         )
 
     if summary_task:
-        pending_summary_tasks[request.participant_id] = asyncio.create_task(
+        summary_finish_task = asyncio.create_task(
             finish_pending_summary(
                 request.participant_id,
+                state,
                 current_topic,
                 summary_task,
                 len(unsummarized_chunk),
@@ -1062,6 +1075,9 @@ async def conversation_turn(request: ConversationTurnRequest):
             "Are you ready to move on?"
         )
 
+        if summary_finish_task:
+            await summary_finish_task
+
         return {
             "jordan_reply": (
                 None
@@ -1085,23 +1101,13 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     # 2. If they are finished, automatically advance
     if topic_completion_result.topic_done:
+        if summary_finish_task:
+            await summary_finish_task
+
         completed_topic_index = state["current_topic_index"]
         completed_topic_number = completed_topic_index + 1
 
         current_topic = get_current_topic(state)
-
-        pending_task = pending_summary_tasks.pop(
-            request.participant_id,
-            None,
-        )
-
-        if pending_task and not pending_task.done():
-            pending_task.cancel()
-
-            try:
-                await pending_task
-            except asyncio.CancelledError:
-                pass
 
         transition_history = [
             *request.conversation_history,
@@ -1139,6 +1145,11 @@ async def conversation_turn(request: ConversationTurnRequest):
         if not state["conversation_complete"]:
             state["topic_history_start"] = len(transition_history)
 
+            persist_state(
+                request.participant_id,
+                state,
+            )
+
             return {
                 "alex_reply": None,
                 "jordan_reply": None,
@@ -1174,6 +1185,11 @@ async def conversation_turn(request: ConversationTurnRequest):
             alex_reply = None
             jordan_reply = jordan_result.reply
 
+        persist_state(
+            request.participant_id,
+            state,
+        )
+        
         return {
             "alex_reply": alex_reply,
             "jordan_reply": jordan_reply,
@@ -1192,6 +1208,9 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     # 3. Decide whether Alex should respond.
     if alex_info_needed:
+        if summary_finish_task:
+            await summary_finish_task
+
         return {
             "jordan_reply": None,
             "alex_info_needed": True,
@@ -1219,6 +1238,9 @@ async def conversation_turn(request: ConversationTurnRequest):
         earlier_memory=shared_memory,
         speaker=speaker,
     )
+
+    if summary_finish_task:
+        await summary_finish_task
 
     return {
         "jordan_reply": jordan_result.reply,
@@ -1348,6 +1370,11 @@ async def conversation_start(request: ConversationStartRequest):
     # Topic 1 starts here
     state["topic_history_start"] = request.topic_history_start
 
+    persist_state(
+        request.participant_id,
+        state,
+    )
+
     # 4. Jordan continues after Alex's topic introduction
     if state["condition"] == CONDITION_SINGLE_INFO:
         jordan_reply = None
@@ -1382,7 +1409,10 @@ async def save_selected_topics(request: TopicSelectionRequest):
         request.condition,
     )
 
-    conversation_states[request.participant_id] = state
+    persist_state(
+        request.participant_id,
+        state,
+    )
 
     print(
         "*** SAVED TOPICS:",

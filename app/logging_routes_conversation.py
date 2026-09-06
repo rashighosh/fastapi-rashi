@@ -275,6 +275,48 @@ def log_conversation_started(body: ConversationStartedLog):
 # Conversation state
 # ---------------------------------------------------------------------------
 
+def load_conversation_state_from_db(participant_id: str):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            f"""
+            SELECT conversation_state
+            FROM {table_name}
+            WHERE participant_id = ?
+            """,
+            participant_id,
+        )
+
+        row = cursor.fetchone()
+
+        if row is None or row[0] is None:
+            return None
+
+        return json.loads(row[0])
+
+
+def save_conversation_state_to_db(participant_id: str, state: dict):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            f"""
+            UPDATE {table_name}
+            SET conversation_state = ?
+            WHERE participant_id = ?
+            """,
+            json.dumps(state),
+            participant_id,
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Participant {participant_id} was not found."
+            )
+
+        conn.commit()
+
 @router.post("/save-conversation-state")
 def save_conversation_state(body: ConversationStateLog):
     try:
