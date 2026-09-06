@@ -600,7 +600,9 @@ async def conversation_alex(request: ConversationAlexRequest):
             )
 
         return {
-            "answer": clean_alex_answer(parsed.answer),
+            "answer": clean_character_reply(
+                clean_alex_answer(parsed.answer)
+            ),
         }
 
     except HTTPException:
