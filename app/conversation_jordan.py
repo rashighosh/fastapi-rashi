@@ -210,6 +210,57 @@ def clean_character_reply(text: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
 
+def is_explicit_move_on(user_message: str) -> bool:
+    text = user_message.strip().lower()
+
+    # Normalize ending punctuation
+    text = re.sub(r"[.!?]+$", "", text).strip()
+
+    move_on_patterns = [
+        r"continue",
+        r"next topic",
+        r"move on",
+        r"let'?s move on",
+        r"go to (the )?next topic",
+        r"move to (the )?next topic",
+        r"i'?m done",
+        r"i am done",
+        r"ready to move on",
+
+        # Allows:
+        # "it's okay; continue"
+        # "okay, next topic"
+        r".*[;,]\s*(continue|next topic|move on|let'?s move on)",
+    ]
+
+    return any(
+        re.fullmatch(pattern, text)
+        for pattern in move_on_patterns
+    )
+
+
+def is_simple_acknowledgement(user_message: str) -> bool:
+    text = user_message.strip().lower()
+    text = re.sub(r"[.!?]+$", "", text).strip()
+
+    acknowledgements = {
+        "okay",
+        "ok",
+        "got it",
+        "i got it",
+        "makes sense",
+        "that makes sense",
+        "understood",
+        "i understand",
+        "thanks",
+        "thank you",
+        "sounds good",
+        "alright",
+        "all right",
+    }
+
+    return text in acknowledgements
+
 def extract_json_object(text: str) -> dict:
     text = text.strip()
 
@@ -606,6 +657,14 @@ async def analyze_topic_completion(
     conversation_history,
     earlier_memory=None,
 ):
+    # Explicit navigation commands should always advance.
+    if is_explicit_move_on(user_message):
+        return TopicCompletionResult(
+            topic_done=True,
+            needs_confirmation=False,
+            reasoning="User explicitly asked to move on.",
+        )
+    
     current_topic = get_current_topic(state)
     rolling_summary = earlier_memory
 
@@ -657,6 +716,16 @@ async def analyze_topic_completion(
     preference, assumption, or other perspective, set topic_done to false.
 
     When uncertain, keep topic_done false.
+
+    Set needs_confirmation to false when:
+    - the user explicitly asks to move on, continue, or says they are done,
+    - or the user directly confirms that they are ready to move on.
+
+    Set needs_confirmation to true only when:
+    - the user's message strongly suggests that they may be finished with the topic,
+    but they have not explicitly asked to move on.
+
+    If topic_done is false, set needs_confirmation to false.
 
     Set reasoning to no more than 20 words.
     """
@@ -1016,18 +1085,6 @@ async def conversation_turn(request: ConversationTurnRequest):
             )
         )
 
-    print("\n===== CURRENT SHARED CONTEXT =====")
-    print("EARLIER MEMORY:")
-    print(shared_memory)
-
-    print("\nRECENT HISTORY:")
-    print(json.dumps(shared_history, indent=2))
-
-    print("\nPRIOR TOPIC SUMMARIES:")
-    print(json.dumps(get_completed_topic_summaries(state), indent=2))
-
-    print("==================================\n")
-
     # 1. Run the routing decisions.
     # c=1 only needs topic completion.
     # c=2/c=3 run topic completion and Alex-support routing concurrently.
@@ -1200,6 +1257,31 @@ async def conversation_turn(request: ConversationTurnRequest):
             "completed_topic_index": completed_topic_index,
             "completed_topic_number": completed_topic_number,
             "completed_topic": completed_topic["topic"],
+            "conversation_complete": state["conversation_complete"],
+            "current_topic_index": state["current_topic_index"],
+            "phase": state["phase"],
+            "topics": state["topics"],
+        }
+
+    # In the information-only condition, a simple acknowledgement
+    # should not trigger another unsolicited factual response.
+    if (
+        state["condition"] == CONDITION_SINGLE_INFO
+        and is_simple_acknowledgement(request.user_message)
+    ):
+        if summary_finish_task:
+            await summary_finish_task
+
+        return {
+            "alex_reply": (
+                "Are you ready to move on to the next topic, "
+                "or is there anything else you'd like to know about this one?"
+            ),
+            "jordan_reply": None,
+            "alex_info_needed": False,
+            "alex_reasoning": "",
+            "topic_done": False,
+            "topic_advanced": False,
             "conversation_complete": state["conversation_complete"],
             "current_topic_index": state["current_topic_index"],
             "phase": state["phase"],
