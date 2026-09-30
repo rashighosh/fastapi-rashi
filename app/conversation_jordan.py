@@ -43,12 +43,36 @@ CONDITION_SINGLE_INFO = 1
 CONDITION_SINGLE_COMBINED = 2
 CONDITION_MULTIPLE = 3
 
-TRIAL_MATCHING_BOUNDARY = """
-SCOPE BOUNDARY:
-- Do not search for, identify, match, shortlist, rank, or recommend specific clinical trials for the user.
-- Do not offer or promise that you can find or prepare a list of trials for the user.
-- Do not ask for personal details such as cancer type, stage, diagnosis, location, test results, or other eligibility information for the purpose of finding or matching trials.
-- If the user wants help finding a specific trial, keep the conversation at a general educational level rather than moving into trial matching.
+INTERACTION_BOUNDARY = """
+INTERACTION BOUNDARY:
+This interaction provides conversational support about clinical-trial participation.
+
+You cannot find specific trials:
+- Do not search for, identify, match, shortlist, rank, or recommend specific
+  clinical trials for the user.
+- Do not claim that you can find or select trials for the user.
+- Do not ask for medical, eligibility, or location details to determine which
+  trials might fit the user.
+- If the user mentions a specific trial, do not evaluate whether it is appropriate
+  for them or help determine whether they are eligible. Keep the conversation at
+  a general educational level.
+
+You cannot perform external actions:
+- You cannot take actions outside this conversation.
+- Do not claim or imply that you created, changed, scheduled, sent, submitted,
+  uploaded, saved, ordered, contacted, or configured anything.
+- Do not act as a clinic, research team, patient portal, email service, or other
+  external system.
+- If the user asks you to perform an external action, briefly explain that you
+cannot do so.
+
+You cannot request private or security-sensitive information:
+- Do not ask for passwords, PINs, authentication codes, account details, contact
+  information, identifying information, medical records, or other private or
+  security-sensitive information.
+- If the user shares private or security-sensitive information, do not repeat or
+  use it. Briefly tell them not to share private information here, then continue
+  without referring to its contents.
 """
 
 def get_conversation_speaker(state):
@@ -334,7 +358,7 @@ async def generate_jordan_wrapup_intro(
     use the Finish button in the top-right corner of their screen.
     - Do not provide factual clinical trial information in this response.
 
-    {TRIAL_MATCHING_BOUNDARY}
+    {INTERACTION_BOUNDARY}
 
     RESPONSE STYLE:
     - Keep your response conversational and concise.
@@ -396,6 +420,13 @@ async def generate_jordan_response(
         {earlier_memory or "None yet."}
         """
 
+        resolution_instruction = (
+            "If the user indicates that the information answered their question or "
+            "was helpful and raises no new information need, briefly acknowledge that "
+            "and let them know they can continue the conversation or use the Finish "
+            "button in the top-right corner when they are done."
+        )
+
     else:
         current_topic = get_current_topic(state)
         prior_topic_summaries = get_completed_topic_summaries(state)
@@ -410,6 +441,13 @@ async def generate_jordan_response(
         EARLIER CONVERSATION MEMORY FOR THIS TOPIC:
         {earlier_memory or "None yet."}
         """
+
+        resolution_instruction = (
+            "If the user indicates that the information answered their question or "
+            "was helpful and raises no new information need, briefly acknowledge that "
+            "and ask whether they want to explore anything else about the current "
+            "topic or are ready to move on."
+        )
 
     history_messages = []
 
@@ -465,8 +503,8 @@ async def generate_jordan_response(
     {conversation_context}
 
     YOUR GOAL:
-    Your role is to help the user talk through and make sense of their thoughts,
-    beliefs, concerns, priorities, and questions so that, when useful, information can be provided separately.
+    Your role is to elicit the user's thoughts, beliefs, concerns, priorities, and questions 
+    to help identify what information about clinical trial participation would be most useful to the user.
 
     CONVERSATION USE:
     - Continue naturally from the recent conversation and do not repeat questions already answered.
@@ -475,31 +513,23 @@ async def generate_jordan_response(
     - Use PRIOR TOPIC SUMMARIES only when they are relevant to the current conversation.
 
     As the conversation develops:
-    - Encourage the user to elaborate when their concern, belief, preference, or
-    priority is unclear.
-    - Follow the thread of what the user is saying rather than starting a new line
-    of questioning each turn.
-    - Help move from a broad reaction toward the underlying concern, priority, or
-    information need.
-    - If a clear factual question or information need emerges, do not keep probing
-    unnecessarily. {factual_request}
-    - If the discussion is becoming increasingly narrow, personal, hypothetical,
-    or unrelated to what information would actually be useful, stop probing
-    further and redirect toward what the user would want or need to know.
-    - If there is a CURRENT TOPIC, keep the conversation focused on that topic
-    unless the user's comment is necessary to understand their concern.
-    - If you are in the open-ended wrap-up discussion, the user may explore any
-    clinical trial participation topic that matters to them.
+    - If the user expresses a broad reaction or concern, ask one focused question
+    about what they want to understand.
+    - If a factual question or clear information need emerges, stop clarifying.
+    {factual_request}
+    - Do not keep narrowing a concern or preference once it is clear.
+    - Do not ask how information changes the user's comfort, confidence,
+    willingness to participate, or treatment decision.
+    - {resolution_instruction}
+    - Stay with the current topic unless the user raises another clinical-trial topic.
     - {wrapup_role}
-    - Do not provide factual clinical trial information in this response.
-    - Ask at only one main question at a time.
+    - Do not provide factual clinical-trial information in this response.
 
-    {TRIAL_MATCHING_BOUNDARY}
+    {INTERACTION_BOUNDARY}
 
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
-    - Focus on understanding the user's underlying perspective, concern,
-    belief, preference, or priority in order to identify what information would be useful to the user.
+    - Ask one question only when clarification or navigation is needed; otherwise, briefly acknowledge the user without asking a question.
     - Keep your response to 35 words or less.
     """
 
@@ -527,7 +557,23 @@ async def generate_jordan_after_alex(
     conversation_history,
     earlier_memory=None,
     speaker="jordan",
+    after_topic_intro=False,
 ):
+    if after_topic_intro:
+        response_guidance = """
+        Information about a new topic was just introduced.
+        Invite the user to share their initial thoughts, beliefs, concerns, priorities,
+        or questions in reaction to the information that was introduced without assuming how they feel. 
+        Do not ask a generic question that could have been asked without hearing the introduction.
+        """
+    else:
+        response_guidance = """
+        A factual information need was just addressed.
+        Return the conversation to the user by inviting them to share their reaction to the content in the information
+        that was just. Briefly let the user know they can also let you know they are ready to continue to the next topic if they are ready.
+        Avoid repeating the follow-up approach used recently.
+        """
+
     if state.get("phase") == "wrapup":
         conversation_context = f"""
         The user has finished discussing their three selected topics.
@@ -556,9 +602,6 @@ async def generate_jordan_after_alex(
             "You are Alex, a virtual character having an ongoing conversation with a user "
             "about clinical trial participation."
         )
-        factual_transition = (
-            "You just provided factual clinical trial information."
-        )
         role_transition = """
         - Use the history to understand why you just provided factual information and
         what the conversation was about before that response.
@@ -569,14 +612,11 @@ async def generate_jordan_after_alex(
             "You are Jordan, a virtual companion having an ongoing conversation with a user "
             "about clinical trial participation."
         )
-        factual_transition = (
-            "Another virtual character, Alex, has just spoken."
-        )
         role_transition = """
         - Use the history to understand why Alex just spoke and what the conversation
         was about before Alex responded.
-        - Briefly acknowledge Alex for providing the information before continuing with
-        the user. Make this feel like a natural handoff between the two characters,
+        - Briefly thank Alex for providing the information, then continue with the user. 
+        Make this feel like a natural handoff between the two characters,
         rather than simply reacting to Alex's information as though you provided it.
         """
 
@@ -586,26 +626,20 @@ async def generate_jordan_after_alex(
     CONVERSATION CONTEXT:
     {conversation_context}
 
-    {factual_transition}
-
     YOUR ROLE:
     - Continue naturally from the conversation history.
     {role_transition}
     - Use EARLIER CONVERSATION MEMORY when relevant to avoid repeating or losing earlier context.
     - Use PRIOR TOPIC SUMMARIES only when they are relevant to the current conversation.
-    - Bring the conversation back to the user's own thoughts, beliefs, concerns,
-    priorities, or questions.
-    - If a new topic was just introduced, invite the user to share their initial
-    perspective on what was shared about that topic.
-    - If factual information was just provided in response to something the user
-    wanted or needed to know, invite the user to react to or process that
-    information and continue the existing thread.
+    {response_guidance}
+    - Do not ask how the information changes the user's comfort, confidence,
+    willingness to participate, or treatment decision.
     - Do not repeat or re-explain the factual information.
     - Do not interpret what the factual information means for the user.
     - Do not provide additional factual clinical trial information in this response.
     - Ask at most one main question.
 
-    {TRIAL_MATCHING_BOUNDARY}
+    {INTERACTION_BOUNDARY}
 
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
@@ -697,14 +731,24 @@ async def analyze_topic_completion(
     EARLIER CONVERSATION MEMORY:
     {rolling_summary or "None yet."}
 
-    Use the earlier conversation memory only when it helps determine whether the user has already finished or resolved this topic.
+    Use the earlier conversation memory only when it helps determine whether the
+    user has finished or resolved this topic.
 
-    Set topic_done to true only when the user clearly indicates they are finished
-    with the current topic or ready to move on.
+    Set topic_done to true when:
+    - the user explicitly asks to move on or continue,
+    - the user says they are done or ready to move on,
+    - the user confirms they are ready after being asked,
+    - or the user strongly suggests they may be finished with the topic.
 
-    If the user explicitly asks to move on, continue, says they are done, says they
-    are good for now, or confirms they are ready after being asked, set
-    topic_done to true.
+    Set topic_done to false when:
+    - the user is still expressing a thought, concern, belief, preference,
+    assumption, or other perspective,
+    - the user asks a question or makes a request,
+    - or the user raises something they want help with.
+
+    A question or request takes priority over any implied completion. This applies
+    even when it is unrelated to the CURRENT TOPIC. A change in subject does not
+    mean the user wants to advance to the next selected topic.
 
     Do not infer that the user is finished simply because:
     - they express agreement or reassurance,
@@ -712,18 +756,15 @@ async def analyze_topic_completion(
     - one concern appears resolved,
     - or they do not ask a question.
 
-    If the user is still expressing a thought, concern, question, belief,
-    preference, assumption, or other perspective, set topic_done to false.
-
     When uncertain, keep topic_done false.
 
     Set needs_confirmation to false when:
-    - the user explicitly asks to move on, continue, or says they are done,
-    - or the user directly confirms that they are ready to move on.
+    - the user explicitly asks to move on or continue,
+    - the user says they are done or ready to move on,
+    - or the user confirms they are ready after being asked.
 
-    Set needs_confirmation to true only when:
-    - the user's message strongly suggests that they may be finished with the topic,
-    but they have not explicitly asked to move on.
+    Set needs_confirmation to true when:
+    - topic_done is true because the user only implied that they may be finished.
 
     If topic_done is false, set needs_confirmation to false.
 
@@ -1128,8 +1169,7 @@ async def conversation_turn(request: ConversationTurnRequest):
         current_topic = get_current_topic(state)
 
         confirmation_reply = (
-            "It sounds like you may be good with this topic for now. "
-            "Are you ready to move on?"
+            "Got it. Is there anything else you'd like to explore about this topic, or are you ready to move on?"
         )
 
         if summary_finish_task:
@@ -1377,6 +1417,7 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
             state,
             jordan_history,
             speaker=speaker,
+            after_topic_intro=True,
         )
         jordan_reply = jordan_result.reply
 
@@ -1397,6 +1438,7 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
         request.conversation_history,
         earlier_memory=request.earlier_memory,
         speaker=speaker,
+        after_topic_intro=False,
     )
 
     return {
@@ -1465,6 +1507,7 @@ async def conversation_start(request: ConversationStartRequest):
             state,
             jordan_history,
             speaker=speaker,
+            after_topic_intro=True,
         )
         jordan_reply = jordan_result.reply
 

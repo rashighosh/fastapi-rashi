@@ -55,13 +55,36 @@ CONDITION_SINGLE_INFO = 1
 CONDITION_SINGLE_COMBINED = 2
 CONDITION_MULTIPLE = 3
 
-TRIAL_MATCHING_BOUNDARY = """
-SCOPE BOUNDARY:
-- Do not search for, identify, match, shortlist, rank, or recommend specific clinical trials.
-- Do not claim that you can find trials for the user.
-- Do not collect or request personal medical, location, or eligibility details for the purpose of matching the user to trials.
-- If the user asks how to find trials, you may explain general resources and people who can help.
-- If the user asks you to find trials for them, stay at that general educational level.
+INTERACTION_BOUNDARY = """
+INTERACTION BOUNDARY:
+This interaction provides conversational support about clinical-trial participation.
+
+You cannot find specific trials:
+- Do not search for, identify, match, shortlist, rank, or recommend specific
+  clinical trials for the user.
+- Do not claim that you can find or select trials for the user.
+- Do not ask for medical, eligibility, or location details to determine which
+  trials might fit the user.
+- If the user mentions a specific trial, do not evaluate whether it is appropriate
+  for them or help determine whether they are eligible. Keep the conversation at
+  a general educational level.
+
+You cannot perform external actions:
+- You cannot take actions outside this conversation.
+- Do not claim or imply that you created, changed, scheduled, sent, submitted,
+  uploaded, saved, ordered, contacted, or configured anything.
+- Do not act as a clinic, research team, patient portal, email service, or other
+  external system.
+  - If the user asks you to perform an external action, briefly explain that you
+  cannot do so.
+
+You cannot request private or security-sensitive information:
+- Do not ask for passwords, PINs, authentication codes, account details, contact
+  information, identifying information, medical records, or other private or
+  security-sensitive information.
+- If the user shares private or security-sensitive information, do not repeat or
+  use it. Briefly tell them not to share private information here, then continue
+  without referring to its contents.
 """
 
 NEXT_STEP_RESOURCES = """
@@ -167,16 +190,19 @@ async def analyze_alex_support(
     - or their concern has already been clarified and new factual information is
     needed to address it.
 
+    The user does not need to phrase the information need as a question.
+
     Set alex_info_needed to false when:
-    - the user is mainly expressing an opinion, reaction, feeling, preference,
-    hesitation, or concern,
-    - their underlying reason is still unclear and should be explored first,
+    - the user gives a broad reaction, feeling, concern, or preference but it is not
+    yet clear what information would help,
+    - the user is simply responding to information and no clarification is needed,
     - the relevant factual information has already been provided,
     - or Alex would mainly repeat information already given.
 
     Do not involve the factual response simply because factual information could
-    be relevant. Ask whether the user currently needs NEW factual information for
-    the conversation to move forward.
+    be relevant. Ask only whether it is clear what NEW factual information would be useful.
+    Do not require further exploration of the user's feelings or reasons once that
+    information need is clear.
 
     {clarification_instruction}
 
@@ -375,7 +401,8 @@ async def generate_alex_topic_intro(
 
     YOUR TASK:
     - Introduce the CURRENT TOPIC naturally based on the TOPIC POSITION guidance above.
-    - Then give a brief factual introduction to the CURRENT TOPIC.
+    - Give only enough factual context for the user to understand what the topic is about.
+    - Your task is to orient the user to the topic, not explaining the topic.
     - Use only the FACTUAL CONTENT above for factual claims.
     - Cover the main information needed to understand the topic.
     - If something from the earlier topic summaries is relevant,
@@ -384,11 +411,11 @@ async def generate_alex_topic_intro(
     - Do not introduce facts based on the summaries.
     - {followup_instruction}
 
-    {TRIAL_MATCHING_BOUNDARY}
+    {INTERACTION_BOUNDARY}
 
     RESPONSE STYLE:
     - Sound like you are introducing a topic, not answering a question.
-    - Keep your response to 75 words or less.
+    - Keep your response to 50 words or less.
     """
 
     response = await client_chat.beta.chat.completions.parse(
@@ -540,7 +567,7 @@ async def conversation_alex(request: ConversationAlexRequest):
     The transition should make your reason for speaking clear without sounding
     formulaic, repetitive, or like a separate announcement.
 
-    {TRIAL_MATCHING_BOUNDARY}
+    {INTERACTION_BOUNDARY}
     {NEXT_STEP_RESOURCES}
 
     Write one conversational paragraph under 75 words.
