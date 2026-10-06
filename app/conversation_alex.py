@@ -271,7 +271,7 @@ async def generate_topic_factual_content(topic: str):
 
     results = rag.retrieve(
         topic,
-        k=8,
+        k=5,
     )
 
     context_list = []
@@ -488,7 +488,7 @@ async def conversation_alex(request: ConversationAlexRequest):
     # Retrieve relevant trusted-source information.
     results = rag.retrieve(
         preprocess.search_query,
-        k=8,
+        k=5,
     )
 
     context_list = []

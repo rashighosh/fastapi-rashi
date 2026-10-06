@@ -94,6 +94,7 @@ class WebsiteFinishedLog(BaseModel):
 
 @router.post("/log-conversation-entered")
 def log_conversation_entered(body: ConversationEnteredLog):
+    print("BODY IS", body)
     print("Logging conversation entered...")
     try:
         with get_conn() as conn:
