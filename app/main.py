@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from pypdf import PdfReader
 from mangum import Mangum
+from conversation_tracker import router as conversation_tracker_router
 from conversation_jordan import router as conversation_jordan_router
 from conversation_alex import (
     router as conversation_alex_router,
@@ -35,7 +36,7 @@ useCORS = True
 origins = ["https://clinical-trial-conversation.d3mhus154b7dn6.amplifyapp.com", "http://localhost:5173"]
 
 # UF base URL for using LLM's w liteLLM + litellm api key
-base_url = "https://api.ai.it.ufl.edu/v1"
+base_url = "https://api.ai.it.ufl.edu"
 RASHI_LITELLM_KEY = os.getenv('RASHI_LITELLM_KEY')
 
 # Function to build a local RAG (From UF AI Agents Workshop)
@@ -291,6 +292,7 @@ app = FastAPI()
 app.include_router(conversation_jordan_router)
 app.include_router(conversation_alex_router)
 app.include_router(logging_conversation_router)
+app.include_router(conversation_tracker_router)
 
 handler = Mangum(app)
 
