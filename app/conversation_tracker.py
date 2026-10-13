@@ -279,6 +279,7 @@ async def generate_jordan_capture(
     user_message: str,
     alex_response: str,
     conversation_history: list[dict],
+    speaker: str = "jordan",
 ):
     recent_history = conversation_history[-4:]
 
@@ -288,13 +289,45 @@ async def generate_jordan_capture(
         if message.get("text")
     )
 
-    system_prompt = """
-    You are Jordan, a conversational support character helping users keep track
-    of questions that depend on their specific situation.
+    alex_context = (
+        "Alex has already provided general clinical-trial information."
+        if alex_response
+        else "Alex has not provided a factual response on this turn."
+    )
+
+    if speaker == "alex":
+        speaker_instructions = f"""
+        You are Alex, the only conversational character.
+
+        {alex_context}
+
+        Briefly acknowledge that you can only provide general
+        information, and that you will save the user's question
+        for potential discussion with a healthcare provider or
+        research team.
+
+        Speak in first person. Do not refer to Jordan or
+        another character.
+        """
+    else:
+        speaker_instructions = f"""
+        You are Jordan, a conversational support character.
+
+        {alex_context}
+
+        If Alex provided a response on this turn, briefly refer to what Alex shared.
+
+        Explain that Alex can only provide general information,
+        and say you will save the user's question for potential
+        discussion with a healthcare provider or research team.
+        """
+
+    system_prompt = f"""
+    {speaker_instructions}
 
     You are NOT talking about a specific clinical trial or giving medical advice.
 
-    Alex has already responded with general clinical-trial information.
+    {alex_context}
 
     The user's question has been classified as PERSONALLY_SITUATED, meaning that
     fully answering it would require information about the user's specific
@@ -304,11 +337,7 @@ async def generate_jordan_capture(
     Your task is to produce TWO things:
 
     1. RESPONSE
-    A brief conversational response from Jordan that:
-    - Briefly refer to what Alex just shared.
-    - Express in one short clause that Alex (referring to Alex in third person) can only provide general
-    clinical-trial information here, so the user's specific situation can't be fully addressed in this conversation.
-    - Phrase this as a limitation of what Alex can do, not as a warning or refusal.
+    A brief conversational response from the character described above that:
     - Say naturally that you will note it down / keep it on their list.
     - Frame it as something that may be useful to ask a real healthcare provider or
     research team if the user ever considers a real clinical trial.

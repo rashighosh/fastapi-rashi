@@ -22,6 +22,11 @@ from conversation_alex import (
     generate_topic_factual_content,
 )
 
+from conversation_tracker import (
+    classify_user_needs,
+    generate_jordan_capture,
+)
+
 from logging_routes_conversation import (
     load_conversation_state_from_db,
     save_conversation_state_to_db,
@@ -93,6 +98,7 @@ def create_conversation_state(selected_topics, condition):
             "summary": None,
             "rolling_summary": None,
             "summarized_until": 0,
+            "personally_situated_questions": [],
         })
 
     return {
@@ -111,6 +117,29 @@ def create_conversation_state(selected_topics, condition):
 def get_current_topic(state):
     index = state["current_topic_index"]
     return state["topics"][index]
+
+def save_personally_situated_question(state, question):
+    current_topic = get_current_topic(state)
+
+    questions = current_topic.setdefault(
+        "personally_situated_questions", []
+    )
+
+    question = question.strip()
+
+    if not question:
+        return
+
+    # Avoid duplicate questions within the same topic
+    if any(
+        q["question"].lower() == question.lower()
+        for q in questions
+    ):
+        return
+
+    questions.append({
+        "question": question
+    })
 
 # Given a user, create new state or grab their existing state
 def get_state(participant_id):
@@ -1160,6 +1189,38 @@ async def conversation_turn(request: ConversationTurnRequest):
         alex_info_needed = alex_support_result.alex_info_needed
         alex_reasoning = alex_support_result.reasoning
 
+        # Detect and save personally situated information needs.
+    if (
+        state["condition"] != CONDITION_SINGLE_INFO
+        and not topic_completion_result.topic_done
+    ):
+        try:
+            classification = await classify_user_needs(
+                user_message=request.user_message,
+                conversation_history=request.conversation_history,
+            )
+
+            # Remember whether this turn needs Jordan to capture a question.
+            state["pending_capture"] = (
+                any(
+                    need.type == "personally_situated"
+                    for need in classification.needs
+                )
+            )
+
+            if state["pending_capture"]:
+                state["pending_capture_user_message"] = request.user_message
+            else:
+                state.pop("pending_capture_user_message", None)
+
+            persist_state(request.participant_id, state)
+
+        except Exception as error:
+            print(
+                "*** PERSONALLY SITUATED TRACKING ERROR:",
+                repr(error),
+            )
+
     # 2. If they seem finished but did not explicitly ask to move on,
     # confirm before advancing.
     if (
@@ -1231,6 +1292,10 @@ async def conversation_turn(request: ConversationTurnRequest):
         current_topic["summary"] = topic_summary.model_dump()
 
         completed_topic = current_topic.copy()
+
+        # Clear any unfinished capture before leaving this topic.
+        state.pop("pending_capture", None)
+        state.pop("pending_capture_user_message", None)
 
         advance_topic(state)
 
@@ -1350,6 +1415,43 @@ async def conversation_turn(request: ConversationTurnRequest):
             "phase": state["phase"],
             "topics": state["topics"],
         }
+
+    # Capture personally situated questions when Alex does not respond.
+    if (
+        state["condition"] in (CONDITION_SINGLE_COMBINED, CONDITION_MULTIPLE)
+        and state.get("pending_capture")
+    ):
+        capture = await generate_jordan_capture(
+            user_message=state["pending_capture_user_message"],
+            alex_response="",
+            conversation_history=request.conversation_history,
+            speaker=speaker,
+        )
+
+        save_personally_situated_question(
+            state,
+            capture.question,
+        )
+
+        state.pop("pending_capture", None)
+        state.pop("pending_capture_user_message", None)
+
+        if summary_finish_task:
+            await summary_finish_task
+
+        persist_state(request.participant_id, state)
+
+        return {
+            "jordan_reply": capture.response,
+            "alex_info_needed": False,
+            "alex_reasoning": alex_reasoning,
+            "topic_done": False,
+            "topic_advanced": False,
+            "conversation_complete": state["conversation_complete"],
+            "current_topic_index": state["current_topic_index"],
+            "phase": state["phase"],
+            "topics": state["topics"],
+        }
     
     # 4. Otherwise, Jordan continues helping the user clarify
     # their perspective or information need.
@@ -1432,6 +1534,39 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
     state = get_state(request.participant_id)
 
     speaker = get_conversation_speaker(state)
+
+    if (
+        state["condition"] in (CONDITION_SINGLE_COMBINED, CONDITION_MULTIPLE)
+        and state.get("pending_capture")
+    ):
+        alex_messages = [
+            message["text"]
+            for message in request.conversation_history
+            if message.get("from", "").lower() == "alex"
+            and message.get("text")
+        ]
+
+        if alex_messages:
+            capture = await generate_jordan_capture(
+                user_message=state["pending_capture_user_message"],
+                alex_response=alex_messages[-1],
+                conversation_history=request.conversation_history,
+                speaker=speaker,
+            )
+
+            save_personally_situated_question(
+                state,
+                capture.question,
+            )
+
+            state.pop("pending_capture", None)
+            state.pop("pending_capture_user_message", None)
+
+            persist_state(request.participant_id, state)
+
+            return {
+                "jordan_reply": capture.response
+            }
 
     jordan_result = await generate_jordan_after_alex(
         state,
