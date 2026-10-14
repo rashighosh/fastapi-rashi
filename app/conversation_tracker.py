@@ -280,6 +280,7 @@ async def generate_jordan_capture(
     alex_response: str,
     conversation_history: list[dict],
     speaker: str = "jordan",
+    need_type: str = "personally_situated",
 ):
     recent_history = conversation_history[-4:]
 
@@ -295,16 +296,34 @@ async def generate_jordan_capture(
         else "Alex has not provided a factual response on this turn."
     )
 
+    if need_type == "personally_situated":
+        capture_guidance = """
+        The user's question requires individualized information.
+
+        Briefly acknowledge that the question has been saved.
+        Mention that it may be useful to discuss with a healthcare
+        provider or research team if the user ever considers a
+        specific clinical trial.
+        """
+    else:
+        capture_guidance = """
+        The user expressed a personally relevant concern or question.
+
+        Briefly acknowledge that it has been saved on their list
+        so they can return to it later.
+
+        Do not imply that individualized medical advice is required.
+        Do not automatically direct the user to a healthcare provider.
+        """
+
     if speaker == "alex":
         speaker_instructions = f"""
         You are Alex, the only conversational character.
 
         {alex_context}
 
-        Briefly acknowledge that you can only provide general
-        information, and that you will save the user's question
-        for potential discussion with a healthcare provider or
-        research team.
+        Briefly acknowledge the user's question or concern and
+        explain that you will keep it on their list.
 
         Speak in first person. Do not refer to Jordan or
         another character.
@@ -315,11 +334,13 @@ async def generate_jordan_capture(
 
         {alex_context}
 
-        If Alex provided a response on this turn, briefly refer to what Alex shared.
+        If Alex provided a response on this turn, you may briefly
+        refer to what Alex shared.
 
-        Explain that Alex can only provide general information,
-        and say you will save the user's question for potential
-        discussion with a healthcare provider or research team.
+        Briefly acknowledge the user's question or concern and
+        explain that you will keep it on their list.
+
+        Do not provide additional factual or medical information.
         """
 
     system_prompt = f"""
@@ -329,18 +350,14 @@ async def generate_jordan_capture(
 
     {alex_context}
 
-    The user's question has been classified as PERSONALLY_SITUATED, meaning that
-    fully answering it would require information about the user's specific
-    circumstances, such as their health, medications, age, insurance, location,
-    provider, or a specific trial.
+    The user's information need has been classified as: {need_type}
+    {capture_guidance}
 
     Your task is to produce TWO things:
 
     1. RESPONSE
     A brief conversational response from the character described above that:
     - Say naturally that you will note it down / keep it on their list.
-    - Frame it as something that may be useful to ask a real healthcare provider or
-    research team if the user ever considers a real clinical trial.
     - Do not imply that the user is currently considering a specific trial, planning
     to join one, or about to speak with a provider or research team.
     - Do not tell the user that they need to contact or confirm something with a
@@ -352,14 +369,13 @@ async def generate_jordan_capture(
     Keep the response to 100 words or less.
 
     2. QUESTION
-    One clear, concrete question to save on the user's question list.
-    The question should:
-    - preserve what the user actually wants to know
-    - focus only on the unresolved personally situated part
-    - be written in first person when natural
-    - be something the user could potentially ask a healthcare provider or
-    research team if they ever consider a real clinical trial
-    - not introduce any new concern
+    Generate one question the user could naturally ask a healthcare provider
+    or research team when discussing a specific clinical trial.
+    - Preserve the user's actual concern without introducing new details.
+    - Use simple, conversational language from the user's perspective.
+    - Ask about trial-specific information, options, or support relevant
+      to their concern, without assuming anything is available.
+    - Phrase it as a direct question, not a task, reminder, or reflection.
     """
 
     user_prompt = f"""

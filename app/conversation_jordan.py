@@ -35,7 +35,7 @@ from logging_routes_conversation import (
 # Set up LLM stuff
 BASE_URL = "https://api.ai.it.ufl.edu/v1"
 RASHI_LITELLM_KEY = os.getenv("RASHI_LITELLM_KEY")
-UF_LOCAL_MODEL = "gpt-oss-120b"
+UF_LOCAL_MODEL = "gpt-oss-20b"
 
 client_chat = AsyncOpenAI(
     api_key=RASHI_LITELLM_KEY,
@@ -118,7 +118,7 @@ def get_current_topic(state):
     index = state["current_topic_index"]
     return state["topics"][index]
 
-def save_personally_situated_question(state, question):
+def save_personally_situated_question(state, question, need_type):
     current_topic = get_current_topic(state)
 
     questions = current_topic.setdefault(
@@ -138,7 +138,8 @@ def save_personally_situated_question(state, question):
         return
 
     questions.append({
-        "question": question
+        "question": question,
+        "type": need_type,
     })
 
 # Given a user, create new state or grab their existing state
@@ -1201,17 +1202,25 @@ async def conversation_turn(request: ConversationTurnRequest):
             )
 
             # Remember whether this turn needs Jordan to capture a question.
+            # Determine whether this turn contains a need worth capturing.
+            need_types = [need.type for need in classification.needs]
+
+            if "personally_situated" in need_types:
+                state["pending_capture_type"] = "personally_situated"
+            elif "personal_application" in need_types:
+                state["pending_capture_type"] = "personal_application"
+            else:
+                state["pending_capture_type"] = None
+
             state["pending_capture"] = (
-                any(
-                    need.type == "personally_situated"
-                    for need in classification.needs
-                )
+                state["pending_capture_type"] is not None
             )
 
             if state["pending_capture"]:
                 state["pending_capture_user_message"] = request.user_message
             else:
                 state.pop("pending_capture_user_message", None)
+                state.pop("pending_capture_type", None)
 
             persist_state(request.participant_id, state)
 
@@ -1220,6 +1229,11 @@ async def conversation_turn(request: ConversationTurnRequest):
                 "*** PERSONALLY SITUATED TRACKING ERROR:",
                 repr(error),
             )
+            state.pop("pending_capture", None)
+            state.pop("pending_capture_user_message", None)
+            state.pop("pending_capture_type", None)
+
+            persist_state(request.participant_id, state)
 
     # 2. If they seem finished but did not explicitly ask to move on,
     # confirm before advancing.
@@ -1296,6 +1310,7 @@ async def conversation_turn(request: ConversationTurnRequest):
         # Clear any unfinished capture before leaving this topic.
         state.pop("pending_capture", None)
         state.pop("pending_capture_user_message", None)
+        state.pop("pending_capture_type", None)
 
         advance_topic(state)
 
@@ -1426,15 +1441,19 @@ async def conversation_turn(request: ConversationTurnRequest):
             alex_response="",
             conversation_history=request.conversation_history,
             speaker=speaker,
+            need_type=state["pending_capture_type"],
         )
 
         save_personally_situated_question(
             state,
             capture.question,
+            state["pending_capture_type"],
         )
 
+        saved_type = state["pending_capture_type"]
         state.pop("pending_capture", None)
         state.pop("pending_capture_user_message", None)
+        state.pop("pending_capture_type", None)
 
         if summary_finish_task:
             await summary_finish_task
@@ -1451,6 +1470,8 @@ async def conversation_turn(request: ConversationTurnRequest):
             "current_topic_index": state["current_topic_index"],
             "phase": state["phase"],
             "topics": state["topics"],
+            "question_saved": capture.question,
+            "question_type": saved_type,
         }
     
     # 4. Otherwise, Jordan continues helping the user clarify
@@ -1546,27 +1567,33 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
             and message.get("text")
         ]
 
-        if alex_messages:
-            capture = await generate_jordan_capture(
-                user_message=state["pending_capture_user_message"],
-                alex_response=alex_messages[-1],
-                conversation_history=request.conversation_history,
-                speaker=speaker,
-            )
+    
+        capture = await generate_jordan_capture(
+            user_message=state["pending_capture_user_message"],
+            alex_response=alex_messages[-1] if alex_messages else "",
+            conversation_history=request.conversation_history,
+            speaker=speaker,
+            need_type=state["pending_capture_type"],
+        )
 
-            save_personally_situated_question(
-                state,
-                capture.question,
-            )
+        save_personally_situated_question(
+            state,
+            capture.question,
+            state["pending_capture_type"],
+        )
 
-            state.pop("pending_capture", None)
-            state.pop("pending_capture_user_message", None)
+        saved_type = state["pending_capture_type"]
+        state.pop("pending_capture", None)
+        state.pop("pending_capture_user_message", None)
+        state.pop("pending_capture_type", None)
 
-            persist_state(request.participant_id, state)
+        persist_state(request.participant_id, state)
 
-            return {
-                "jordan_reply": capture.response
-            }
+        return {
+            "jordan_reply": capture.response,
+            "question_saved": capture.question,
+            "question_type": saved_type,
+        }
 
     jordan_result = await generate_jordan_after_alex(
         state,

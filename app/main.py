@@ -42,7 +42,7 @@ RASHI_LITELLM_KEY = os.getenv('RASHI_LITELLM_KEY')
 # Function to build a local RAG (From UF AI Agents Workshop)
 # ---- Choose an embedding model available on your Navigator proxy ----
 EMBED_MODEL = "nomic-embed-text-v1.5"  # change if your proxy uses a different name or a different model
-UF_LOCAL_MODEL = 'gpt-oss-120b'
+UF_LOCAL_MODEL = 'gpt-oss-20b'
 
 client_rag = openai.OpenAI(
     api_key=RASHI_LITELLM_KEY,
