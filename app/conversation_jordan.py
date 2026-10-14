@@ -241,10 +241,9 @@ class PrepareNextTopicRequest(BaseModel):
     conversation_history: list = Field(default_factory=list)
     condition: int = CONDITION_MULTIPLE
 
-class TopicCompletionResult(BaseModel):
-    topic_done: bool
-    needs_confirmation: bool
-    reasoning: str
+class AdvanceTopicRequest(BaseModel):
+    participant_id: str
+    conversation_history: list = Field(default_factory=list)
 
 class TopicSummaryResult(BaseModel):
     user_perspective: str
@@ -263,35 +262,6 @@ def clean_character_reply(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     ).strip()
-
-def is_explicit_move_on(user_message: str) -> bool:
-    text = user_message.strip().lower()
-
-    # Normalize ending punctuation
-    text = re.sub(r"[.!?]+$", "", text).strip()
-
-    move_on_patterns = [
-        r"continue",
-        r"next topic",
-        r"move on",
-        r"let'?s move on",
-        r"go to (the )?next topic",
-        r"move to (the )?next topic",
-        r"i'?m done",
-        r"i am done",
-        r"ready to move on",
-
-        # Allows:
-        # "it's okay; continue"
-        # "okay, next topic"
-        r".*[;,]\s*(continue|next topic|move on|let'?s move on)",
-    ]
-
-    return any(
-        re.fullmatch(pattern, text)
-        for pattern in move_on_patterns
-    )
-
 
 def is_simple_acknowledgement(user_message: str) -> bool:
     text = user_message.strip().lower()
@@ -451,10 +421,9 @@ async def generate_jordan_response(
         """
 
         resolution_instruction = (
-            "If the user indicates that the information answered their question or "
-            "was helpful and raises no new information need, briefly acknowledge that "
-            "and let them know they can continue the conversation or use the Finish "
-            "button in the top-right corner when they are done."
+            "If the user indicates that their question was answered or the information "
+            "was helpful and raises no new information need, briefly acknowledge "
+            "their response without asking another question."
         )
 
     else:
@@ -473,12 +442,10 @@ async def generate_jordan_response(
         """
 
         resolution_instruction = (
-            "If the user indicates that the information answered their question or "
-            "was helpful and raises no new information need, briefly acknowledge that "
-            "and ask whether they want to explore anything else about the current "
-            "topic or are ready to move on."
+            "If the user indicates that their question was answered or the information "
+            "was helpful and raises no new information need, briefly acknowledge "
+            "their response without asking another question."
         )
-
     history_messages = []
 
     for message in conversation_history:
@@ -559,7 +526,7 @@ async def generate_jordan_response(
 
     RESPONSE STYLE:
     - Keep your reply conversational and concise.
-    - Ask one question only when clarification or navigation is needed; otherwise, briefly acknowledge the user without asking a question.
+    - Ask one question only when clarification is needed; otherwise, briefly acknowledge the user without asking a question.
     - Keep your response to 35 words or less.
     """
 
@@ -599,8 +566,8 @@ async def generate_jordan_after_alex(
     else:
         response_guidance = """
         A factual information need was just addressed.
-        Return the conversation to the user by inviting them to share their reaction to the content in the information
-        that was just. Briefly let the user know they can also let you know they are ready to continue to the next topic if they are ready.
+        Return the conversation to the user by inviting them to share
+        their reaction to the information Alex provided.
         Avoid repeating the follow-up approach used recently.
         """
 
@@ -713,110 +680,6 @@ async def generate_jordan_after_alex(
         raise RuntimeError("Failed to parse Jordan response")
 
     parsed.reply = clean_character_reply(parsed.reply)
-    return parsed
-
-async def analyze_topic_completion(
-    state,
-    user_message,
-    conversation_history,
-    earlier_memory=None,
-):
-    # Explicit navigation commands should always advance.
-    if is_explicit_move_on(user_message):
-        return TopicCompletionResult(
-            topic_done=True,
-            needs_confirmation=False,
-            reasoning="User explicitly asked to move on.",
-        )
-    
-    current_topic = get_current_topic(state)
-    rolling_summary = earlier_memory
-
-    history_messages = []
-
-    for message in conversation_history:
-        sender = message.get("from")
-        text = message.get("text")
-
-        if not text:
-            continue
-
-        if sender == "user":
-            history_messages.append({
-                "role": "user",
-                "content": text,
-            })
-        else:
-            history_messages.append({
-                "role": "assistant",
-                "content": f"{sender}: {text}",
-            })
-
-    system_prompt = f"""
-    You are determining whether the user has finished discussing the current topic.
-
-    CURRENT TOPIC:
-    {current_topic["topic"]}
-
-    EARLIER CONVERSATION MEMORY:
-    {rolling_summary or "None yet."}
-
-    Use the earlier conversation memory only when it helps determine whether the
-    user has finished or resolved this topic.
-
-    Set topic_done to true when:
-    - the user explicitly asks to move on or continue,
-    - the user says they are done or ready to move on,
-    - the user confirms they are ready after being asked,
-    - or the user strongly suggests they may be finished with the topic.
-
-    Set topic_done to false when:
-    - the user is still expressing a thought, concern, belief, preference,
-    assumption, or other perspective,
-    - the user asks a question or makes a request,
-    - or the user raises something they want help with.
-
-    A question or request takes priority over any implied completion. This applies
-    even when it is unrelated to the CURRENT TOPIC. A change in subject does not
-    mean the user wants to advance to the next selected topic.
-
-    Do not infer that the user is finished simply because:
-    - they express agreement or reassurance,
-    - they make a concluding-sounding statement,
-    - one concern appears resolved,
-    - or they do not ask a question.
-
-    When uncertain, keep topic_done false.
-
-    Set needs_confirmation to false when:
-    - the user explicitly asks to move on or continue,
-    - the user says they are done or ready to move on,
-    - or the user confirms they are ready after being asked.
-
-    Set needs_confirmation to true when:
-    - topic_done is true because the user only implied that they may be finished.
-
-    If topic_done is false, set needs_confirmation to false.
-
-    Set reasoning to no more than 20 words.
-    """
-
-    response = await client_chat.beta.chat.completions.parse(
-        model=UF_LOCAL_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            *history_messages,
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        response_format=TopicCompletionResult,
-    )
-
-    parsed = response.choices[0].message.parsed
-
-    if parsed is None:
-        raise RuntimeError("Failed to parse topic completion response")
-
     return parsed
 
 async def generate_topic_summary(
@@ -1156,45 +1019,24 @@ async def conversation_turn(request: ConversationTurnRequest):
             )
         )
 
-    # 1. Run the routing decisions.
-    # c=1 only needs topic completion.
-    # c=2/c=3 run topic completion and Alex-support routing concurrently.
+    # Determine whether Alex should provide information.
     if state["condition"] == CONDITION_SINGLE_INFO:
-        topic_completion_result = await analyze_topic_completion(
-            state,
+        alex_info_needed = True
+        alex_reasoning = ""
+    else:
+        alex_support_result = await analyze_alex_support(
+            current_topic["topic"],
             request.user_message,
             shared_history,
             earlier_memory=shared_memory,
-        )
-
-        alex_info_needed = True
-        alex_reasoning = ""
-
-    else:
-        topic_completion_result, alex_support_result = await asyncio.gather(
-            analyze_topic_completion(
-                state,
-                request.user_message,
-                shared_history,
-                earlier_memory=shared_memory,
-            ),
-            analyze_alex_support(
-                current_topic["topic"],
-                request.user_message,
-                shared_history,
-                earlier_memory=shared_memory,
-                condition=state["condition"],
-            ),
+            condition=state["condition"],
         )
 
         alex_info_needed = alex_support_result.alex_info_needed
         alex_reasoning = alex_support_result.reasoning
 
-        # Detect and save personally situated information needs.
-    if (
-        state["condition"] != CONDITION_SINGLE_INFO
-        and not topic_completion_result.topic_done
-    ):
+    # Detect and save personally situated information needs.
+    if state["condition"] != CONDITION_SINGLE_INFO:
         try:
             classification = await classify_user_needs(
                 user_message=request.user_message,
@@ -1235,154 +1077,6 @@ async def conversation_turn(request: ConversationTurnRequest):
 
             persist_state(request.participant_id, state)
 
-    # 2. If they seem finished but did not explicitly ask to move on,
-    # confirm before advancing.
-    if (
-        topic_completion_result.topic_done
-        and topic_completion_result.needs_confirmation
-    ):
-        current_topic = get_current_topic(state)
-
-        confirmation_reply = (
-            "Got it. Is there anything else you'd like to explore about this topic, or are you ready to move on?"
-        )
-
-        if summary_finish_task:
-            await summary_finish_task
-
-        return {
-            "jordan_reply": (
-                None
-                if state["condition"] == CONDITION_SINGLE_INFO
-                else confirmation_reply
-            ),
-            "alex_reply": (
-                confirmation_reply
-                if state["condition"] == CONDITION_SINGLE_INFO
-                else None
-            ),
-            "alex_info_needed": False,
-            "alex_reasoning": "",
-            "topic_done": False,
-            "topic_advanced": False,
-            "conversation_complete": state["conversation_complete"],
-            "current_topic_index": state["current_topic_index"],
-            "phase": state["phase"],
-            "topics": state["topics"],
-        }
-
-    # 2. If they are finished, automatically advance
-    if topic_completion_result.topic_done:
-        if summary_finish_task:
-            await summary_finish_task
-
-        completed_topic_index = state["current_topic_index"]
-        completed_topic_number = completed_topic_index + 1
-
-        current_topic = get_current_topic(state)
-
-        transition_history = [
-            *request.conversation_history,
-            {
-                "from": "user",
-                "text": request.user_message,
-            }
-        ]
-
-        final_topic_history = [
-            *shared_history,
-            {
-                "from": "user",
-                "text": request.user_message,
-            }
-        ]
-
-        topic_summary = await generate_topic_summary(
-            current_topic["topic"],
-            final_topic_history,
-            earlier_memory=shared_memory,
-        )
-
-        current_topic["summary"] = topic_summary.model_dump()
-
-        completed_topic = current_topic.copy()
-
-        # Clear any unfinished capture before leaving this topic.
-        state.pop("pending_capture", None)
-        state.pop("pending_capture_user_message", None)
-        state.pop("pending_capture_type", None)
-
-        advance_topic(state)
-
-        if state["phase"] == "wrapup":
-            state["wrapup_history_start"] = len(transition_history)
-
-        # If there is another topic, return now so the frontend can
-        # show "Preparing next topic" while the next intro generates.
-        if not state["conversation_complete"]:
-            state["topic_history_start"] = len(transition_history)
-
-            persist_state(
-                request.participant_id,
-                state,
-            )
-
-            return {
-                "alex_reply": None,
-                "jordan_reply": None,
-                "alex_info_needed": False,
-                "alex_reasoning": "",
-                "topic_done": True,
-                "topic_advanced": True,
-                "prepare_next_topic": True,
-                "completed_topic_index": completed_topic_index,
-                "completed_topic_number": completed_topic_number,
-                "completed_topic": completed_topic["topic"],
-                "conversation_complete": state["conversation_complete"],
-                "current_topic_index": state["current_topic_index"],
-                "phase": state["phase"],
-                "topics": state["topics"],
-            }
-
-        wrapup_intro_history = transition_history[-10:]
-
-        if state["condition"] == CONDITION_SINGLE_INFO:
-            alex_reply = (
-                "We've finished your three selected topics. "
-                "You can ask me any other questions you have about clinical trial participation, "
-                "or use the Finish button when you're done."
-            )
-            jordan_reply = None
-        else:
-            jordan_result = await generate_jordan_wrapup_intro(
-                state,
-                wrapup_intro_history,
-                speaker=speaker,
-            )
-            alex_reply = None
-            jordan_reply = jordan_result.reply
-
-        persist_state(
-            request.participant_id,
-            state,
-        )
-        
-        return {
-            "alex_reply": alex_reply,
-            "jordan_reply": jordan_reply,
-            "alex_info_needed": False,
-            "alex_reasoning": "",
-            "topic_done": True,
-            "topic_advanced": True,
-            "completed_topic_index": completed_topic_index,
-            "completed_topic_number": completed_topic_number,
-            "completed_topic": completed_topic["topic"],
-            "conversation_complete": state["conversation_complete"],
-            "current_topic_index": state["current_topic_index"],
-            "phase": state["phase"],
-            "topics": state["topics"],
-        }
-
     # In the information-only condition, a simple acknowledgement
     # should not trigger another unsolicited factual response.
     if (
@@ -1394,8 +1088,7 @@ async def conversation_turn(request: ConversationTurnRequest):
 
         return {
             "alex_reply": (
-                "Are you ready to move on to the next topic, "
-                "or is there anything else you'd like to know about this one?"
+                "You're welcome! Feel free to ask any other questions about this topic."
             ),
             "jordan_reply": None,
             "alex_info_needed": False,
@@ -1497,6 +1190,95 @@ async def conversation_turn(request: ConversationTurnRequest):
         "current_topic_index": state["current_topic_index"],
         "phase": state["phase"],
         "topics": state["topics"],
+    }
+
+@router.post("/advance-topic")
+async def advance_topic_from_button(request: AdvanceTopicRequest):
+    state = get_state(request.participant_id)
+
+    if state["conversation_complete"]:
+        raise HTTPException(
+            status_code=400,
+            detail="All topics have already been completed.",
+        )
+
+    current_topic = get_current_topic(state)
+
+    # Combine previously summarized memory with remaining messages
+    shared_memory = current_topic.get("rolling_summary")
+
+    unsummarized_start = (
+        state["topic_history_start"]
+        + current_topic["summarized_until"]
+    )
+
+    final_topic_history = request.conversation_history[unsummarized_start:]
+
+    # Generate and save the topic summary
+    topic_summary = await generate_topic_summary(
+        current_topic["topic"],
+        final_topic_history,
+        earlier_memory=shared_memory,
+    )
+
+    current_topic["summary"] = topic_summary.model_dump()
+
+    # Record which topic was completed
+    completed_topic_index = state["current_topic_index"]
+    completed_topic_number = completed_topic_index + 1
+
+    # Clear any pending question capture
+    state.pop("pending_capture", None)
+    state.pop("pending_capture_user_message", None)
+    state.pop("pending_capture_type", None)
+
+    # Advance to the next topic or wrap-up
+    advance_topic(state)
+
+    # Set the conversation history boundary for the next phase
+    if state["phase"] == "wrapup":
+        state["wrapup_history_start"] = len(request.conversation_history)
+    else:
+        state["topic_history_start"] = len(request.conversation_history)
+
+    # Generate the wrap-up introduction after the final topic
+    alex_reply = None
+    jordan_reply = None
+
+    if state["conversation_complete"]:
+        if state["condition"] == CONDITION_SINGLE_INFO:
+            alex_reply = (
+                "We've finished your three selected topics. "
+                "You can ask me any other questions you have about clinical trial "
+                "participation, or use the Finish button when you're done."
+            )
+        else:
+            speaker = (
+                "alex"
+                if state["condition"] == CONDITION_SINGLE_COMBINED
+                else "jordan"
+            )
+
+            jordan_result = await generate_jordan_wrapup_intro(
+                state,
+                request.conversation_history[-10:],
+                speaker=speaker,
+            )
+            jordan_reply = jordan_result.reply
+
+    # Save the updated state
+    persist_state(request.participant_id, state)
+
+    return {
+        "topic_advanced": True,
+        "completed_topic_number": completed_topic_number,
+        "current_topic_index": state["current_topic_index"],
+        "conversation_complete": state["conversation_complete"],
+        "phase": state["phase"],
+        "topics": state["topics"],
+        "prepare_next_topic": not state["conversation_complete"],
+        "alex_reply": alex_reply,
+        "jordan_reply": jordan_reply,
     }
 
 @router.post("/prepare-next-topic")

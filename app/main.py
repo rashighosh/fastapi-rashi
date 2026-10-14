@@ -483,6 +483,7 @@ async def preprocess_question(question, history):
         {question}
         """
 
+    print ("AB TO CALL CLIENT")
     response = await client_chat.beta.chat.completions.parse(
         model=UF_LOCAL_MODEL,
         messages=[{"role": "user", "content": prompt}],
