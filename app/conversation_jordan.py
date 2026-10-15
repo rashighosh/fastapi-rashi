@@ -1019,6 +1019,18 @@ async def conversation_turn(request: ConversationTurnRequest):
             )
         )
 
+
+    # Start personal-need classification concurrently with Alex routing.
+    classification_task = None
+
+    if state["condition"] != CONDITION_SINGLE_INFO:
+        classification_task = asyncio.create_task(
+            classify_user_needs(
+                user_message=request.user_message,
+                conversation_history=request.conversation_history,
+            )
+        )
+
     # Determine whether Alex should provide information.
     if state["condition"] == CONDITION_SINGLE_INFO:
         alex_info_needed = True
@@ -1035,13 +1047,11 @@ async def conversation_turn(request: ConversationTurnRequest):
         alex_info_needed = alex_support_result.alex_info_needed
         alex_reasoning = alex_support_result.reasoning
 
+    
     # Detect and save personally situated information needs.
-    if state["condition"] != CONDITION_SINGLE_INFO:
+    if classification_task is not None:
         try:
-            classification = await classify_user_needs(
-                user_message=request.user_message,
-                conversation_history=request.conversation_history,
-            )
+            classification = await classification_task
 
             # Remember whether this turn needs Jordan to capture a question.
             # Determine whether this turn contains a need worth capturing.
