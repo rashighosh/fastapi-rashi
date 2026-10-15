@@ -255,6 +255,148 @@ class TopicSelectionRequest(BaseModel):
     selected_topics: list[str]
     condition: int = CONDITION_MULTIPLE
 
+class SuggestResourcesRequest(BaseModel):
+    participant_id: str
+
+class SuggestedResourcesResult(BaseModel):
+    resource_ids: list[str]
+    explanation: str
+
+APPROVED_RESOURCES = [
+    {
+        "id": "featured-trials",
+        "title": "See examples of real clinical trials",
+        "description": "Explore featured clinical trials from the National Cancer Institute.",
+    },
+    {
+        "id": "personal-stories",
+        "title": "Read personal stories",
+        "description": "Hear about experiences from people who have participated in cancer research.",
+    },
+    {
+        "id": "sample-consent",
+        "title": "See a sample consent form",
+        "description": "See the kind of information participants may receive before deciding whether to join a study.",
+    },
+    {
+        "id": "questions-to-ask",
+        "title": "See questions you could ask",
+        "description": "Review questions you may want to ask a doctor or research team about a clinical trial.",
+    },
+    {
+        "id": "details-checklist",
+        "title": "Get ready to look for a trial",
+        "description": "See what information about your cancer may be useful when looking for clinical trials.",
+    },
+    {
+        "id": "finding-guide",
+        "title": "Learn how to find clinical trials",
+        "description": "Read a step-by-step guide to finding clinical trials from the National Cancer Institute.",
+    },
+    {
+        "id": "nci-specialist",
+        "title": "Talk with an NCI specialist",
+        "description": "Get help and cancer information from a trained National Cancer Institute specialist.",
+    },
+    {
+        "id": "trial-search",
+        "title": "Search for clinical trials",
+        "description": "Search the National Cancer Institute database for cancer clinical trials.",
+    },
+]
+
+
+async def generate_resource_suggestions(state):
+    # Gather the participant's completed topic summaries and saved questions.
+    participant_context = []
+
+    for topic in state["topics"]:
+        participant_context.append({
+            "topic": topic["topic"],
+            "summary": topic.get("summary"),
+            "personally_situated_questions": topic.get(
+                "personally_situated_questions", []
+            ),
+        })
+
+    system_prompt = f"""
+    You are selecting educational resources for someone who has just
+    completed a conversation about clinical trial participation.
+
+    PARTICIPANT CONTEXT:
+    {json.dumps(participant_context)}
+
+    APPROVED RESOURCES:
+    {json.dumps(APPROVED_RESOURCES)}
+
+    YOUR TASK:
+    Select 2 or 3 resources that would be most useful for this participant
+    based on the topics they discussed and the needs they expressed.
+
+    SELECTION GUIDELINES:
+    - Prioritize the participant's explicitly expressed questions,
+      concerns, preferences, and priorities.
+    - Consider their personally situated questions when relevant.
+    - Use the topic summaries to understand their information needs.
+    - Do not assume that selecting a topic means the participant has
+      a particular concern or preference.
+    - Do not invent information about the participant.
+    - Do not infer medical conditions, clinical trial eligibility,
+      or readiness to participate.
+    - If few personal needs were expressed, select broadly useful
+      educational resources relevant to the topics discussed.
+    - Return only resource IDs from APPROVED RESOURCES.
+    - Do not recommend the same resource twice.
+    - Do not generate URLs or invent additional resources.
+    - Do not search for, match, evaluate, or recommend specific trials.
+
+    EXPLANATION:
+    - Write one brief, conversational explanation introducing
+      the suggested resources.
+    - Explain the relevance to what the participant discussed,
+      without overstating what you know about them.
+    - Do not imply that these resources are medically appropriate
+      or that the participant should join a clinical trial.
+    - Do not mention individual resource titles; the interface
+      will display them separately.
+    - Use 35 words or fewer.
+    """
+
+    response = await client_chat.beta.chat.completions.parse(
+        model=UF_LOCAL_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+        ],
+        temperature=0,
+        response_format=SuggestedResourcesResult,
+    )
+
+    parsed = response.choices[0].message.parsed
+
+    if parsed is None:
+        raise RuntimeError("Failed to parse resource suggestions")
+
+    # Only accept IDs from the approved resource catalog.
+    allowed_ids = {
+        resource["id"] for resource in APPROVED_RESOURCES
+    }
+
+    valid_ids = []
+
+    for resource_id in parsed.resource_ids:
+        if resource_id in allowed_ids and resource_id not in valid_ids:
+            valid_ids.append(resource_id)
+
+    if not 2 <= len(valid_ids) <= 3:
+        raise ValueError(
+            "Model did not return 2-3 distinct approved resources"
+        )
+
+    return {
+        "resource_ids": valid_ids,
+        "explanation": parsed.explanation.strip(),
+    }
+
 def clean_character_reply(text: str) -> str:
     return re.sub(
         r"^\s*(?:Alex|Jordan)\s*:\s*",
@@ -835,6 +977,38 @@ async def finish_pending_summary(
 
 # ENDPOINTS 
 
+@router.post("/suggest-resources")
+async def suggest_resources(request: SuggestResourcesRequest):
+    state = get_state(request.participant_id)
+
+    # Recommendations are available only after all topics are complete.
+    if not state.get("conversation_complete"):
+        raise HTTPException(
+            status_code=400,
+            detail="Complete all three topics before requesting resources.",
+        )
+
+    # Only conversational conditions receive tailored suggestions.
+    if state["condition"] not in (
+        CONDITION_SINGLE_COMBINED,
+        CONDITION_MULTIPLE,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Resource suggestions are not available for this condition.",
+        )
+
+    try:
+        suggestions = await generate_resource_suggestions(state)
+    except Exception as error:
+        print("*** RESOURCE SUGGESTION ERROR:", repr(error))
+        raise HTTPException(
+            status_code=503,
+            detail="Could not generate resource suggestions.",
+        ) from error
+
+    return suggestions
+
 @router.post("/turn")
 async def conversation_turn(request: ConversationTurnRequest):
 
@@ -1251,30 +1425,24 @@ async def advance_topic_from_button(request: AdvanceTopicRequest):
     else:
         state["topic_history_start"] = len(request.conversation_history)
 
-    # Generate the wrap-up introduction after the final topic
+    
+    # Static closing after the third topic
     alex_reply = None
     jordan_reply = None
 
     if state["conversation_complete"]:
-        if state["condition"] == CONDITION_SINGLE_INFO:
-            alex_reply = (
-                "We've finished your three selected topics. "
-                "You can ask me any other questions you have about clinical trial "
-                "participation, or use the Finish button when you're done."
-            )
-        else:
-            speaker = (
-                "alex"
-                if state["condition"] == CONDITION_SINGLE_COMBINED
-                else "jordan"
-            )
+        alex_reply = (
+            "That brings us to the end of your three topics! "
+            "I hope our conversation has helped you better understand "
+            "clinical trial participation."
+        )
 
-            jordan_result = await generate_jordan_wrapup_intro(
-                state,
-                request.conversation_history[-10:],
-                speaker=speaker,
+        if state["condition"] != CONDITION_SINGLE_INFO:
+            jordan_reply = (
+                "Before you go, would you like to see some suggested "
+                "resources to explore next, based on what you shared "
+                "during our conversation?"
             )
-            jordan_reply = jordan_result.reply
 
     # Save the updated state
     persist_state(request.participant_id, state)
