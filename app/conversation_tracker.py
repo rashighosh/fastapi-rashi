@@ -301,19 +301,21 @@ async def generate_jordan_capture(
         The user's question requires individualized information.
 
         Briefly acknowledge that the question has been saved.
-        Mention that it may be useful to discuss with a healthcare
-        provider or research team if the user ever considers a
-        specific clinical trial.
+        Explain that it may be useful to bring up if the user ever
+        speaks with a healthcare provider or looks into a specific
+        clinical trial.
+
+        Do not attempt to answer the individualized question.
         """
     else:
         capture_guidance = """
         The user expressed a personally relevant concern or question.
 
-        Briefly acknowledge that it has been saved on their list
-        so they can return to it later.
+        Briefly acknowledge that it has been saved on their list.
+        Explain that it may be useful to revisit when talking with
+        a healthcare provider or looking into a specific clinical trial.
 
         Do not imply that individualized medical advice is required.
-        Do not automatically direct the user to a healthcare provider.
         """
 
     if speaker == "alex":
@@ -365,6 +367,15 @@ async def generate_jordan_capture(
     - Do not ask the user to share any personal or medical information.
     - Do not state the entire question itself.
     - Do not introduce a new concern.
+    - After acknowledging the saved question, do not invite the user
+    to discuss it further in this conversation.
+    - Do not say phrases like "let me know when you're ready to discuss
+    it", "we can explore that together", or "feel free to ask me more".
+    - Frame the saved question as something the user may find useful
+    in a future conversation with a healthcare provider or when
+    exploring a specific clinical trial.
+    - Do not imply that the user must take these actions.
+    - Keep the response to 35 words or fewer.
 
     Keep the response to 100 words or less.
 
