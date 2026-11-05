@@ -27,6 +27,7 @@ import pickle
 import glob
 import io
 import soundfile as sf
+import time
 
 load_dotenv()
 
@@ -416,12 +417,38 @@ async def tts(request: TTSRequest):
     )
 
     # Generate the audio.
-    res = await client_chat.audio.speech.create(
-        model="kokoro",
-        voice=character_voice,
-        input=spoken_text,
-        speed=voice_speed,
+    tts_start = time.perf_counter()
+
+    print(
+        f"[TTS START] character={character} "
+        f"characters={len(spoken_text)}",
+        flush=True,
     )
+
+    try:
+        res = await client_chat.audio.speech.create(
+            model="kokoro",
+            voice=character_voice,
+            input=spoken_text,
+            speed=voice_speed,
+        )
+
+        print(
+            f"[TTS COMPLETE] {time.perf_counter() - tts_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[TTS ERROR] after {time.perf_counter() - tts_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
+
+    processing_start = time.perf_counter()
+
+    print("[TTS PROCESSING START]", flush=True)
 
     audio_bytes = res.content
 
@@ -443,6 +470,14 @@ async def tts(request: TTSRequest):
     timestamps = create_fallback_timestamps(
         spoken_text,
         duration,
+    )
+
+    print(
+        f"[TTS PROCESSING COMPLETE] "
+        f"{time.perf_counter() - processing_start:.2f}s "
+        f"| audio_duration={duration:.2f}s "
+        f"| audio_bytes={len(audio_bytes)}",
+        flush=True,
     )
 
     return {

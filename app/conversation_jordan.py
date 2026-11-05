@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any
 import asyncio
+import time
 
 load_dotenv()
 
@@ -693,13 +694,10 @@ async def generate_jordan_after_alex(
             "about clinical trial participation."
         )
         role_transition = """
-        - Use the history to understand why Alex just spoke and what the conversation
-        was about before Alex responded.
-        - Briefly thank Alex for providing the information, then continue with the user. 
-        Make this feel like a natural handoff between the two characters,
-        rather than simply reacting to Alex's information.
+        - Use the history to understand why Alex just provided factual information and
+        what the conversation was about before that response.
+        - Continue naturally from the factual information Alex just provided.
         - Direct any follow-up question to the user, not Alex.
-        - When referring to information Alex provided, say "Alex explained".
         """
 
     system_prompt = f"""
@@ -1012,8 +1010,13 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     # Start personal-need classification concurrently with Alex routing.
     classification_task = None
-
+    classification_start = time.perf_counter()
+    
     if state["condition"] != CONDITION_SINGLE_INFO:
+        classification_start = time.perf_counter()
+
+        print("[NEEDS CLASSIFICATION START]", flush=True)
+
         classification_task = asyncio.create_task(
             classify_user_needs(
                 user_message=request.user_message,
@@ -1026,13 +1029,33 @@ async def conversation_turn(request: ConversationTurnRequest):
         alex_info_needed = True
         alex_reasoning = ""
     else:
-        alex_support_result = await analyze_alex_support(
-            current_topic["topic"],
-            request.user_message,
-            shared_history,
-            earlier_memory=shared_memory,
-            condition=state["condition"],
-        )
+        routing_start = time.perf_counter()
+
+        print("[ALEX ROUTING START]", flush=True)
+
+        try:
+            alex_support_result = await analyze_alex_support(
+                current_topic["topic"],
+                request.user_message,
+                shared_history,
+                earlier_memory=shared_memory,
+                condition=state["condition"],
+            )
+
+            print(
+                f"[ALEX ROUTING COMPLETE] "
+                f"{time.perf_counter() - routing_start:.2f}s",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(
+                f"[ALEX ROUTING ERROR] "
+                f"after {time.perf_counter() - routing_start:.2f}s: "
+                f"{repr(error)}",
+                flush=True,
+            )
+            raise
 
         alex_info_needed = alex_support_result.alex_info_needed
         alex_reasoning = alex_support_result.reasoning
@@ -1042,6 +1065,12 @@ async def conversation_turn(request: ConversationTurnRequest):
     if classification_task is not None:
         try:
             classification = await classification_task
+
+            print(
+                f"[NEEDS CLASSIFICATION COMPLETE] "
+                f"{time.perf_counter() - classification_start:.2f}s",
+                flush=True,
+            )
 
             # Remember whether this turn needs Jordan to capture a question.
             # Determine whether this turn contains a need worth capturing.
@@ -1129,12 +1158,20 @@ async def conversation_turn(request: ConversationTurnRequest):
         state["condition"] in (CONDITION_SINGLE_COMBINED, CONDITION_MULTIPLE)
         and state.get("pending_capture")
     ):
+        capture_start = time.perf_counter()
+        print("[JORDAN CAPTURE START]", flush=True)
         capture = await generate_jordan_capture(
             user_message=state["pending_capture_user_message"],
             alex_response="",
             conversation_history=request.conversation_history,
             speaker=speaker,
             need_type=state["pending_capture_type"],
+        )
+
+        print(
+            f"[JORDAN CAPTURE COMPLETE] "
+            f"{time.perf_counter() - capture_start:.2f}s",
+            flush=True,
         )
 
         question_added = save_personally_situated_question(
@@ -1169,13 +1206,32 @@ async def conversation_turn(request: ConversationTurnRequest):
     
     # 4. Otherwise, Jordan continues helping the user clarify
     # their perspective or information need.
-    jordan_result = await generate_jordan_response(
-        state,
-        request.user_message,
-        shared_history,
-        earlier_memory=shared_memory,
-        speaker=speaker,
-    )
+    jordan_start = time.perf_counter()
+    print("[JORDAN RESPONSE START]", flush=True)
+
+    try:
+        jordan_result = await generate_jordan_response(
+            state,
+            request.user_message,
+            shared_history,
+            earlier_memory=shared_memory,
+            speaker=speaker,
+        )
+
+        print(
+            f"[JORDAN RESPONSE COMPLETE] "
+            f"{time.perf_counter() - jordan_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[JORDAN RESPONSE ERROR] "
+            f"after {time.perf_counter() - jordan_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     if summary_finish_task:
         await summary_finish_task
@@ -1215,11 +1271,30 @@ async def advance_topic_from_button(request: AdvanceTopicRequest):
     final_topic_history = request.conversation_history[unsummarized_start:]
 
     # Generate and save the topic summary
-    topic_summary = await generate_topic_summary(
-        current_topic["topic"],
-        final_topic_history,
-        earlier_memory=shared_memory,
-    )
+    summary_start = time.perf_counter()
+    print("[TOPIC SUMMARY START]", flush=True)
+
+    try:
+        topic_summary = await generate_topic_summary(
+            current_topic["topic"],
+            final_topic_history,
+            earlier_memory=shared_memory,
+        )
+
+        print(
+            f"[TOPIC SUMMARY COMPLETE] "
+            f"{time.perf_counter() - summary_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[TOPIC SUMMARY ERROR] "
+            f"after {time.perf_counter() - summary_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     current_topic["summary"] = topic_summary.model_dump()
 
@@ -1289,9 +1364,28 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
 
     current_topic = get_current_topic(state)
 
-    factual_content = await generate_topic_factual_content(
-        current_topic["topic"]
-    )
+    factual_start = time.perf_counter()
+    print("[TOPIC FACTUAL CONTENT START]", flush=True)
+
+    try:
+        factual_content = await generate_topic_factual_content(
+            current_topic["topic"]
+        )
+
+        print(
+            f"[TOPIC FACTUAL CONTENT COMPLETE] "
+            f"{time.perf_counter() - factual_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[TOPIC FACTUAL CONTENT ERROR] "
+            f"after {time.perf_counter() - factual_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     topic_position = (
         "last"
@@ -1299,13 +1393,32 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
         else "middle"
     )
 
-    alex_result = await generate_alex_topic_intro(
-        current_topic=current_topic["topic"],
-        factual_content=factual_content,
-        prior_summaries=get_completed_topic_summaries(state),
-        topic_position=topic_position,
-        condition=state["condition"],
-    )
+    intro_start = time.perf_counter()
+    print("[TOPIC INTRO START]", flush=True)
+
+    try:
+        alex_result = await generate_alex_topic_intro(
+            current_topic=current_topic["topic"],
+            factual_content=factual_content,
+            prior_summaries=get_completed_topic_summaries(state),
+            topic_position=topic_position,
+            condition=state["condition"],
+        )
+
+        print(
+            f"[TOPIC INTRO COMPLETE] "
+            f"{time.perf_counter() - intro_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[TOPIC INTRO ERROR] "
+            f"after {time.perf_counter() - intro_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     return {
         "alex_reply": alex_result.reply,
@@ -1330,7 +1443,10 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
             and message.get("text")
         ]
 
-    
+
+        capture_start = time.perf_counter()
+        print("[JORDAN AFTER-ALEX CAPTURE START]", flush=True)
+
         capture = await generate_jordan_capture(
             user_message=state["pending_capture_user_message"],
             alex_response=alex_messages[-1] if alex_messages else "",
@@ -1339,6 +1455,12 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
             need_type=state["pending_capture_type"],
         )
 
+        print(
+            f"[JORDAN AFTER-ALEX CAPTURE COMPLETE] "
+            f"{time.perf_counter() - capture_start:.2f}s",
+            flush=True,
+        )
+        
         question_added = save_personally_situated_question(
             state,
             capture.question,
@@ -1358,13 +1480,32 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
             "question_type": saved_type,
         }
 
-    jordan_result = await generate_jordan_after_alex(
-        state,
-        request.conversation_history,
-        earlier_memory=request.earlier_memory,
-        speaker=speaker,
-        after_topic_intro=request.after_topic_intro,
-    )
+    followup_start = time.perf_counter()
+    print("[JORDAN AFTER-ALEX FOLLOWUP START]", flush=True)
+
+    try:
+        jordan_result = await generate_jordan_after_alex(
+            state,
+            request.conversation_history,
+            earlier_memory=request.earlier_memory,
+            speaker=speaker,
+            after_topic_intro=request.after_topic_intro,
+        )
+
+        print(
+            f"[JORDAN AFTER-ALEX FOLLOWUP COMPLETE] "
+            f"{time.perf_counter() - followup_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[JORDAN AFTER-ALEX FOLLOWUP ERROR] "
+            f"after {time.perf_counter() - followup_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     return {
         "jordan_reply": jordan_result.reply
@@ -1392,20 +1533,58 @@ async def conversation_start(request: ConversationStartRequest):
     current_topic = get_current_topic(state)
 
     # 1. Use factual content generated when topics were selected
-    factual_content = await generate_topic_factual_content(
-        current_topic["topic"]
-    )
+    factual_start = time.perf_counter()
+    print("[FIRST TOPIC FACTUAL START]", flush=True)
+
+    try:
+        factual_content = await generate_topic_factual_content(
+            current_topic["topic"]
+        )
+
+        print(
+            f"[FIRST TOPIC FACTUAL COMPLETE] "
+            f"{time.perf_counter() - factual_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[FIRST TOPIC FACTUAL ERROR] "
+            f"after {time.perf_counter() - factual_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     topic_position = "first"
 
    # 1. Generate factual content for Topic 1
-    alex_result = await generate_alex_topic_intro(
-        current_topic=current_topic["topic"],
-        factual_content=factual_content,
-        prior_summaries=[],
-        topic_position=topic_position,
-        condition=state["condition"],
-    )
+    intro_start = time.perf_counter()
+    print("[FIRST TOPIC INTRO START]", flush=True)
+
+    try:
+        alex_result = await generate_alex_topic_intro(
+            current_topic=current_topic["topic"],
+            factual_content=factual_content,
+            prior_summaries=[],
+            topic_position=topic_position,
+            condition=state["condition"],
+        )
+
+        print(
+            f"[FIRST TOPIC INTRO COMPLETE] "
+            f"{time.perf_counter() - intro_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[FIRST TOPIC INTRO ERROR] "
+            f"after {time.perf_counter() - intro_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     # 3. Give Jordan Alex's opening as context
     jordan_history = [
@@ -1428,12 +1607,31 @@ async def conversation_start(request: ConversationStartRequest):
     if state["condition"] == CONDITION_SINGLE_INFO:
         jordan_reply = None
     else:
-        jordan_result = await generate_jordan_after_alex(
-            state,
-            jordan_history,
-            speaker=speaker,
-            after_topic_intro=True,
-        )
+        followup_start = time.perf_counter()
+        print("[FIRST TOPIC FOLLOWUP START]", flush=True)
+
+        try:
+            jordan_result = await generate_jordan_after_alex(
+                state,
+                jordan_history,
+                speaker=speaker,
+                after_topic_intro=True,
+            )
+
+            print(
+                f"[FIRST TOPIC FOLLOWUP COMPLETE] "
+                f"{time.perf_counter() - followup_start:.2f}s",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(
+                f"[FIRST TOPIC FOLLOWUP ERROR] "
+                f"after {time.perf_counter() - followup_start:.2f}s: "
+                f"{repr(error)}",
+                flush=True,
+            )
+            raise
         jordan_reply = jordan_result.reply
 
     return {

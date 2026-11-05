@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 import json
 import re
 from typing import Any
+import time
 
 # Router stuff
 router = APIRouter(
@@ -463,16 +464,55 @@ async def conversation_alex(request: ConversationAlexRequest):
             },
         )
 
-    preprocess = await preprocess_question(
-        question,
-        preprocess_history,
-    )
+    preprocess_start = time.perf_counter()
+    print("[ALEX PREPROCESS START]", flush=True)
+
+    try:
+        preprocess = await preprocess_question(
+            question,
+            preprocess_history,
+        )
+
+        print(
+            f"[ALEX PREPROCESS COMPLETE] "
+            f"{time.perf_counter() - preprocess_start:.2f}s",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[ALEX PREPROCESS ERROR] "
+            f"after {time.perf_counter() - preprocess_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     # Retrieve relevant trusted-source information.
-    results = rag.retrieve(
-        preprocess.search_query,
-        k=5,
-    )
+    rag_start = time.perf_counter()
+    print("[ALEX RAG START]", flush=True)
+
+    try:
+        results = rag.retrieve(
+            preprocess.search_query,
+            k=5,
+        )
+
+        print(
+            f"[ALEX RAG COMPLETE] "
+            f"{time.perf_counter() - rag_start:.2f}s "
+            f"| results={len(results)}",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"[ALEX RAG ERROR] "
+            f"after {time.perf_counter() - rag_start:.2f}s: "
+            f"{repr(error)}",
+            flush=True,
+        )
+        raise
 
     context_list = []
 
@@ -593,11 +633,19 @@ async def conversation_alex(request: ConversationAlexRequest):
     )
 
     try:
+        answer_start = time.perf_counter()
+        print("[ALEX ANSWER START]", flush=True)
         response = await client_chat.beta.chat.completions.parse(
             model=UF_LOCAL_MODEL,
             messages=chat_messages,
             temperature=0,
             response_format=AlexResponse,
+        )
+
+        print(
+            f"[ALEX ANSWER COMPLETE] "
+            f"{time.perf_counter() - answer_start:.2f}s",
+            flush=True,
         )
 
         parsed = response.choices[0].message.parsed
