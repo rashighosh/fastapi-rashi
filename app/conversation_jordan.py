@@ -128,19 +128,21 @@ def save_personally_situated_question(state, question, need_type):
     question = question.strip()
 
     if not question:
-        return
+        return False
 
     # Avoid duplicate questions within the same topic
     if any(
         q["question"].lower() == question.lower()
         for q in questions
     ):
-        return
+        return False
 
     questions.append({
         "question": question,
         "type": need_type,
     })
+
+    return True
 
 # Given a user, create new state or grab their existing state
 def get_state(participant_id):
@@ -1135,7 +1137,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             need_type=state["pending_capture_type"],
         )
 
-        save_personally_situated_question(
+        question_added = save_personally_situated_question(
             state,
             capture.question,
             state["pending_capture_type"],
@@ -1161,7 +1163,7 @@ async def conversation_turn(request: ConversationTurnRequest):
             "current_topic_index": state["current_topic_index"],
             "phase": state["phase"],
             "topics": state["topics"],
-            "question_saved": capture.question,
+            "question_saved": capture.question if question_added else None,
             "question_type": saved_type,
         }
     
@@ -1337,7 +1339,7 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
             need_type=state["pending_capture_type"],
         )
 
-        save_personally_situated_question(
+        question_added = save_personally_situated_question(
             state,
             capture.question,
             state["pending_capture_type"],
@@ -1352,7 +1354,7 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
 
         return {
             "jordan_reply": capture.response,
-            "question_saved": capture.question,
+            "question_saved": capture.question if question_added else None,
             "question_type": saved_type,
         }
 
