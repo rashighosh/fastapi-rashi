@@ -235,6 +235,7 @@ class JordanAfterAlexRequest(BaseModel):
     participant_id: str
     conversation_history: list = Field(default_factory=list)
     earlier_memory: str | None = None
+    after_topic_intro: bool = False
 
 class PrepareNextTopicRequest(BaseModel):
     participant_id: str
@@ -265,7 +266,6 @@ class ResourceExplanation(BaseModel):
 
 class SuggestedResourcesResult(BaseModel):
     resource_ids: list[str]
-    explanation: str
     resource_explanations: list[ResourceExplanation]
 
 APPROVED_RESOURCES = [
@@ -357,26 +357,16 @@ async def generate_resource_suggestions(state):
     - Do not search for, match, evaluate, or recommend specific trials.
 
     EXPLANATION:
-    - In the explanation field, write a short introduction:
-      "Here are a few resources related to what we discussed."
-    - In resource_explanations, provide exactly one explanation
-      per selected resource, in the same order as resource_ids.
-    - Each explanation will be spoken aloud.
-    - Name the resource and connect it directly to a question,
-      concern, or preference the user actually expressed.
-    - Say a concern came up repeatedly only if the context
-      clearly supports that.
-    - If no explicit concern matches, connect the resource
-      to a topic discussed without inventing a personal need.
-    - Use one sentence of 25 words or fewer per resource.
-    - Do not summarize the resource's contents or give detailed
-      instructions for using it.
-    - Base claims about resources only on the approved catalog.
-      Do not claim they contain specific sections or stories
-      that the catalog does not establish.
-    - Do not imply medical suitability, trial eligibility,
-      or that the user should participate.
-    - Do not include URLs or interface instructions.
+    - In resource_explanations, provide one explanation per selected
+      resource, in the same order as resource_ids.
+    - Each explanation will be spoken aloud, so keep it natural
+      and conversational (one sentence, max 25 words).
+    - Name the resource and explain why it may be useful based
+      on a specific question, concern, or preference the user expressed.
+    - If no personal need matches, reference a topic discussed
+      without inventing a concern.
+    - Avoid repetitive phrasing, generic resource descriptions,
+      unsupported claims, or implying medical suitability.
     """
 
     response = await client_chat.beta.chat.completions.parse(
@@ -430,7 +420,6 @@ async def generate_resource_suggestions(state):
 
     return {
         "resource_ids": valid_ids,
-        "explanation": parsed.explanation.strip(),
         "resource_explanations": [
             {
                 "resource_id": resource_id,
@@ -494,99 +483,6 @@ def extract_json_object(text: str) -> dict:
         )
 
     return json.loads(text[start:end + 1])
-
-async def generate_jordan_wrapup_intro(
-    state,
-    conversation_history,
-    speaker="jordan",
-):
-    topics_covered = [
-        topic["topic"]
-        for topic in state["topics"]
-    ]
-
-    if speaker == "alex":
-        identity = (
-            "You are Alex, a virtual character helping a user talk through their "
-            "thoughts about clinical trial participation."
-        )
-        factual_support = (
-            "Make clear that factual information can be provided when helpful."
-        )
-    else:
-        identity = (
-            "You are Jordan, a virtual companion helping a user talk through their "
-            "thoughts about clinical trial participation."
-        )
-        factual_support = (
-            "Make clear that Alex can provide factual information when helpful."
-        )
-
-    system_prompt = f"""
-    {identity}
-
-    The user has now finished discussing all three of their selected topics.
-
-    TOPICS THEY COVERED:
-    {json.dumps(topics_covered)}
-
-    YOUR TASK:
-    - Briefly acknowledge that they have finished their selected topics.
-    - Naturally mention the three topics they discussed.
-    - Do not list them mechanically or use bullets.
-    - Then open the floor for anything else they would like to talk through
-      about clinical trial participation.
-    - They may have another question, concern, belief, or thought they want
-      to explore.
-    - {factual_support}
-    - Let the user know that if they are finished with the conversation, they can
-    use the Finish button in the top-right corner of their screen.
-    - Do not provide factual clinical trial information in this response.
-
-    {INTERACTION_BOUNDARY}
-
-    RESPONSE STYLE:
-    - Keep your response conversational and concise.
-    - Keep your response to 50 words or less.
-    """
-
-    history_messages = []
-
-    for message in conversation_history:
-        sender = message.get("from")
-        text = message.get("text")
-
-        if not text:
-            continue
-
-        if sender == "user":
-            history_messages.append({
-                "role": "user",
-                "content": text
-            })
-        else:
-            history_messages.append({
-                "role": "assistant",
-                "content": f"{sender}: {text}"
-            })
-
-    response = await client_chat.beta.chat.completions.parse(
-        model=UF_LOCAL_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            *history_messages,
-        ],
-        temperature=0,
-        response_format=JordanTurnResult,
-    )
-
-    parsed = response.choices[0].message.parsed
-
-    if parsed is None:
-        raise RuntimeError("Failed to parse Jordan wrap-up intro")
-
-    parsed.reply = clean_character_reply(parsed.reply)
-    return parsed
 
 # Jordan's LLM response
 async def generate_jordan_response(
@@ -1033,15 +929,12 @@ async def suggest_resources(request: SuggestResourcesRequest):
             detail="Complete all three topics before requesting resources.",
         )
 
-    # Only conversational conditions receive tailored suggestions.
-    if state["condition"] not in (
-        CONDITION_SINGLE_COMBINED,
-        CONDITION_MULTIPLE,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Resource suggestions are not available for this condition.",
-        )
+    # Baseline does not receive personalized recommendations.
+    if state["condition"] == CONDITION_SINGLE_INFO:
+        return {
+            "resource_ids": [],
+            "resource_explanations": [],
+        }
 
     try:
         suggestions = await generate_resource_suggestions(state)
@@ -1061,137 +954,13 @@ async def conversation_turn(request: ConversationTurnRequest):
 
     speaker = get_conversation_speaker(state)
 
-    # WRAP-UP PHASE:
-    # The selected topics are complete, but Jordan and Alex can continue
-    # discussing anything else the user wants to explore.
-    if state.get("phase") == "wrapup":
-
-        shared_memory = state.get("wrapup_rolling_summary")
-
-        unsummarized_start = (
-            state["wrapup_history_start"]
-            + state["wrapup_summarized_until"]
+    # No further conversation turns after the final topic.
+    if state.get("conversation_complete"):
+        raise HTTPException(
+            status_code=400,
+            detail="Conversation topics are complete.",
         )
 
-        shared_history = request.conversation_history[
-            unsummarized_start:
-        ]
-
-        unsummarized_chunk = get_unsummarized_chunk(
-            request.conversation_history,
-            state["wrapup_history_start"],
-            state["wrapup_summarized_until"],
-        )
-
-        wrapup_summary_finish_task = None
-        summary_task = None
-
-        if unsummarized_chunk:
-            summary_task = asyncio.create_task(
-                update_rolling_summary(
-                    shared_memory,
-                    unsummarized_chunk,
-                )
-            )
-
-        if summary_task:
-            async def finish_wrapup_summary():
-                try:
-                    updated_summary = await summary_task
-
-                    state["wrapup_rolling_summary"] = updated_summary
-                    state["wrapup_summarized_until"] += len(
-                        unsummarized_chunk
-                    )
-
-                    persist_state(
-                        request.participant_id,
-                        state,
-                    )
-
-                except Exception as error:
-                    print(
-                        "*** WRAPUP ROLLING SUMMARY ERROR:",
-                        repr(error),
-                    )
-
-            wrapup_summary_finish_task = asyncio.create_task(
-                finish_wrapup_summary()
-            )
-
-        if state["condition"] == CONDITION_SINGLE_INFO:
-            if wrapup_summary_finish_task:
-                await wrapup_summary_finish_task
-
-            return {
-                "jordan_reply": None,
-                "alex_reply": None,
-                "alex_info_needed": True,
-                "alex_reasoning": "",
-                "shared_memory": shared_memory,
-                "shared_history": shared_history,
-                "prior_topic_summaries": get_completed_topic_summaries(state),
-                "topic_done": False,
-                "topic_advanced": False,
-                "conversation_complete": state["conversation_complete"],
-                "current_topic_index": state["current_topic_index"],
-                "phase": state["phase"],
-                "topics": state["topics"],
-            }
-
-        alex_support_result = await analyze_alex_support(
-            "Open-ended wrap-up discussion about clinical trial participation",
-            request.user_message,
-            shared_history,
-            earlier_memory=shared_memory,
-            condition=state["condition"],
-        )
-
-        if alex_support_result.alex_info_needed:
-            if wrapup_summary_finish_task:
-                await wrapup_summary_finish_task
-
-            return {
-                "jordan_reply": None,
-                "alex_info_needed": True,
-                "alex_reasoning": alex_support_result.reasoning,
-
-                "shared_memory": shared_memory,
-                "shared_history": shared_history,
-
-                "prior_topic_summaries": get_completed_topic_summaries(state),
-
-                "topic_done": False,
-                "topic_advanced": False,
-                "conversation_complete": True,
-                "current_topic_index": state["current_topic_index"],
-                "phase": state["phase"],
-                "topics": state["topics"],
-            }
-
-        jordan_result = await generate_jordan_response(
-            state,
-            request.user_message,
-            shared_history,
-            earlier_memory=shared_memory,
-            speaker=speaker,
-        )
-
-        if wrapup_summary_finish_task:
-            await wrapup_summary_finish_task
-
-        return {
-            "jordan_reply": jordan_result.reply,
-            "alex_info_needed": False,
-            "alex_reasoning": alex_support_result.reasoning,
-            "topic_done": False,
-            "topic_advanced": False,
-            "conversation_complete": True,
-            "current_topic_index": state["current_topic_index"],
-            "phase": state["phase"],
-            "topics": state["topics"],
-        }
-    
     current_topic = get_current_topic(state)
 
     # Freeze the rolling memory that existed at the START of this turn.
@@ -1482,7 +1251,12 @@ async def advance_topic_from_button(request: AdvanceTopicRequest):
             "clinical trial participation."
         )
 
-        if state["condition"] != CONDITION_SINGLE_INFO:
+        if state["condition"] == CONDITION_SINGLE_INFO:
+            alex_reply += (
+                " Before you go, would you like to see a few general "
+                "resources about clinical trials?"
+            )
+        else:
             jordan_reply = (
                 "Before you go, would you like to see some suggested "
                 "resources to explore next, based on what you shared "
@@ -1531,27 +1305,9 @@ async def prepare_next_topic(request: PrepareNextTopicRequest):
         condition=state["condition"],
     )
 
-    jordan_history = [
-        {
-            "from": "Alex",
-            "text": alex_result.reply,
-        }
-    ]
-
-    if state["condition"] == CONDITION_SINGLE_INFO:
-        jordan_reply = None
-    else:
-        jordan_result = await generate_jordan_after_alex(
-            state,
-            jordan_history,
-            speaker=speaker,
-            after_topic_intro=True,
-        )
-        jordan_reply = jordan_result.reply
-
     return {
         "alex_reply": alex_result.reply,
-        "jordan_reply": jordan_reply,
+        "jordan_reply": None,
     }
 
 @router.post("/after-alex")
@@ -1605,7 +1361,7 @@ async def conversation_after_alex(request: JordanAfterAlexRequest):
         request.conversation_history,
         earlier_memory=request.earlier_memory,
         speaker=speaker,
-        after_topic_intro=False,
+        after_topic_intro=request.after_topic_intro,
     )
 
     return {

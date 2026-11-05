@@ -1,7 +1,8 @@
 import os
 import json
 import pyodbc
-
+from datetime import datetime, timezone
+from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -84,6 +85,19 @@ class IntroFinishedLog(BaseModel):
 class SelectedResourcesLog(BaseModel):
     participant_id: str = Field(min_length=1)
     selected_resources: list[str]
+
+class RecommendedResourcesLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    recommended_resources: list[dict]
+
+class ResourcePreviewLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+
+class ResourceRequestEventLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
+    event: Literal["requested", "unrequested"]
 
 class WebsiteFinishedLog(BaseModel):
     participant_id: str = Field(min_length=1)
@@ -657,6 +671,132 @@ def log_intro_finished(body: IntroFinishedLog):
 # ---------------------------------------------------------------------------
 # Selected next-step resources
 # ---------------------------------------------------------------------------
+@router.post("/log-recommended-resources")
+def log_recommended_resources(body: RecommendedResourcesLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET recommended_resources = ?
+                WHERE participant_id = ?
+                """,
+                json.dumps(body.recommended_resources),
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "message": "Recommended resources logged.",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-recommended-resources] ERROR:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log recommended resources: {str(exc)}",
+        )
+
+@router.post("/log-resource-request-event")
+def log_resource_request_event(body: ResourceRequestEventLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET resource_request_events = JSON_MODIFY(
+                    COALESCE(resource_request_events, N'[]'),
+                    'append $',
+                    JSON_QUERY(?)
+                )
+                WHERE participant_id = ?
+                """,
+                json.dumps({
+                    "resource_id": body.resource_id,
+                    "event": body.event,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }),
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-resource-request-event] ERROR:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log resource request event: {str(exc)}",
+        )
+
+@router.post("/log-resource-preview")
+def log_resource_preview(body: ResourcePreviewLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET resource_preview_events = JSON_MODIFY(
+                    COALESCE(resource_preview_events, N'[]'),
+                    'append $',
+                    JSON_QUERY(?)
+                )
+                WHERE participant_id = ?
+                """,
+                json.dumps({
+                    "resource_id": body.resource_id,
+                    "event": "opened",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }),
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-resource-preview] ERROR:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log resource preview: {str(exc)}",
+        )
 
 @router.post("/log-selected-resources")
 def log_selected_resources(body: SelectedResourcesLog):
