@@ -383,7 +383,7 @@ async def generate_alex_topic_intro(
     {topic_position_guidance}
 
     YOUR TASK:
-    - Introduce the CURRENT TOPIC naturally based on the TOPIC POSITION guidance above.
+    - Begin with one short transition sentence that explicitly names the CURRENT TOPIC in plain language based on the TOPIC POSITION guidance above.
     - Give only enough factual context for the user to understand what the topic is about.
     - Your task is to orient the user to the topic, not explaining the topic.
     - Use only the FACTUAL CONTENT above for factual claims.

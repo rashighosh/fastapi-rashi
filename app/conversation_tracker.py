@@ -301,10 +301,6 @@ async def generate_jordan_capture(
         The user's question requires individualized information.
 
         Briefly acknowledge that the question has been saved.
-        Explain that it may be useful to bring up if the user ever
-        speaks with a healthcare provider or looks into a specific
-        clinical trial.
-
         Do not attempt to answer the individualized question.
         """
     else:
@@ -312,9 +308,6 @@ async def generate_jordan_capture(
         The user expressed a personally relevant concern or question.
 
         Briefly acknowledge that it has been saved on their list.
-        Explain that it may be useful to revisit when talking with
-        a healthcare provider or looking into a specific clinical trial.
-
         Do not imply that individualized medical advice is required.
         """
 
@@ -358,26 +351,21 @@ async def generate_jordan_capture(
     Your task is to produce TWO things:
 
     1. RESPONSE
-    A brief conversational response from the character described above that:
-    - Say naturally that you will note it down / keep it on their list.
-    - Do not imply that the user is currently considering a specific trial, planning
-    to join one, or about to speak with a provider or research team.
-    - Do not tell the user that they need to contact or confirm something with a
-    provider or study team.
-    - Do not ask the user to share any personal or medical information.
-    - Do not state the entire question itself.
-    - Do not introduce a new concern.
-    - After acknowledging the saved question, do not invite the user
-    to discuss it further in this conversation.
-    - Do not say phrases like "let me know when you're ready to discuss
-    it", "we can explore that together", or "feel free to ask me more".
-    - Frame the saved question as something the user may find useful
-    in a future conversation with a healthcare provider or when
-    exploring a specific clinical trial.
-    - Do not imply that the user must take these actions.
-    - Keep the response to 35 words or fewer.
+    Write one short, natural sentence confirming the question or
+    concern was added to the user's list.
+    - Briefly name the specific concern so the user knows what
+      was captured, without repeating the full saved question.
+    - Address the user directly.
+    - Do not routinely begin with "Got it" or "Thanks for sharing."
+    - Avoid repeating the wording of recent list acknowledgments.
+    - Do not explain what the list is for or mention future
+      conversations with providers or research teams here.
+    - Do not repeat Alex's answer or add medical information.
+    - Do not introduce a new concern or ask a follow-up question.
+    - Do not invite the user to discuss the saved question further.
+    - Do not imply the user is considering or joining a specific trial.
+    - Use 25 words or fewer.
 
-    Keep the response to 100 words or less.
 
     2. QUESTION
     Generate one question the user could naturally ask a healthcare provider

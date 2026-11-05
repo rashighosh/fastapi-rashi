@@ -258,9 +258,15 @@ class TopicSelectionRequest(BaseModel):
 class SuggestResourcesRequest(BaseModel):
     participant_id: str
 
+class ResourceExplanation(BaseModel):
+    resource_id: str
+    explanation: str
+
+
 class SuggestedResourcesResult(BaseModel):
     resource_ids: list[str]
     explanation: str
+    resource_explanations: list[ResourceExplanation]
 
 APPROVED_RESOURCES = [
     {
@@ -351,15 +357,26 @@ async def generate_resource_suggestions(state):
     - Do not search for, match, evaluate, or recommend specific trials.
 
     EXPLANATION:
-    - Write one brief, conversational explanation introducing
-      the suggested resources.
-    - Explain the relevance to what the participant discussed,
-      without overstating what you know about them.
-    - Do not imply that these resources are medically appropriate
-      or that the participant should join a clinical trial.
-    - Do not mention individual resource titles; the interface
-      will display them separately.
-    - Use 35 words or fewer.
+    - In the explanation field, write a short introduction:
+      "Here are a few resources related to what we discussed."
+    - In resource_explanations, provide exactly one explanation
+      per selected resource, in the same order as resource_ids.
+    - Each explanation will be spoken aloud.
+    - Name the resource and connect it directly to a question,
+      concern, or preference the user actually expressed.
+    - Say a concern came up repeatedly only if the context
+      clearly supports that.
+    - If no explicit concern matches, connect the resource
+      to a topic discussed without inventing a personal need.
+    - Use one sentence of 25 words or fewer per resource.
+    - Do not summarize the resource's contents or give detailed
+      instructions for using it.
+    - Base claims about resources only on the approved catalog.
+      Do not claim they contain specific sections or stories
+      that the catalog does not establish.
+    - Do not imply medical suitability, trial eligibility,
+      or that the user should participate.
+    - Do not include URLs or interface instructions.
     """
 
     response = await client_chat.beta.chat.completions.parse(
@@ -392,9 +409,35 @@ async def generate_resource_suggestions(state):
             "Model did not return 2-3 distinct approved resources"
         )
 
+        # Require one nonempty spoken explanation per selected resource.
+    explanations_by_id = {}
+
+    for item in parsed.resource_explanations:
+        resource_id = item.resource_id
+        explanation = item.explanation.strip()
+
+        if (
+            resource_id not in valid_ids
+            or resource_id in explanations_by_id
+            or not explanation
+        ):
+            raise ValueError("Invalid resource explanation")
+
+        explanations_by_id[resource_id] = explanation
+
+    if set(explanations_by_id) != set(valid_ids):
+        raise ValueError("Missing resource explanation")
+
     return {
         "resource_ids": valid_ids,
         "explanation": parsed.explanation.strip(),
+        "resource_explanations": [
+            {
+                "resource_id": resource_id,
+                "explanation": explanations_by_id[resource_id],
+            }
+            for resource_id in valid_ids
+        ],
     }
 
 def clean_character_reply(text: str) -> str:
@@ -756,7 +799,9 @@ async def generate_jordan_after_alex(
         was about before Alex responded.
         - Briefly thank Alex for providing the information, then continue with the user. 
         Make this feel like a natural handoff between the two characters,
-        rather than simply reacting to Alex's information as though you provided it.
+        rather than simply reacting to Alex's information.
+        - Direct any follow-up question to the user, not Alex.
+        - When referring to information Alex provided, say "Alex explained".
         """
 
     system_prompt = f"""
