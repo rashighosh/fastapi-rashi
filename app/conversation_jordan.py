@@ -643,9 +643,10 @@ async def generate_jordan_after_alex(
     if after_topic_intro:
         response_guidance = """
         Information about a new topic was just introduced.
-        Invite the user to share their initial thoughts, beliefs, concerns, priorities,
+        You must ask the user one open-ended question that invites them to share their initial thoughts, beliefs, concerns, priorities,
         or questions in reaction to the information that was introduced without assuming how they feel. 
         Do not ask a generic question that could have been asked without hearing the introduction.
+        Do not provide additional factual information or reassurance.
         """
     else:
         response_guidance = """
