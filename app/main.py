@@ -12,6 +12,7 @@ from conversation_alex import (
     router as conversation_alex_router,
     configure_conversation_alex,
 )
+from study_conversation import router as study_router
 from logging_routes_conversation import (
     router as logging_conversation_router,
 )
@@ -292,6 +293,7 @@ app = FastAPI()
 
 app.include_router(conversation_jordan_router)
 app.include_router(conversation_alex_router)
+app.include_router(study_router)
 app.include_router(logging_conversation_router)
 app.include_router(conversation_tracker_router)
 
