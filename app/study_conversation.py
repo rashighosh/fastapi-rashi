@@ -45,6 +45,8 @@ STUDY_TOPICS = [
     },
 ]
 
+study_sessions = {}
+
 
 class ConversationMessage(BaseModel):
     from_: str = Field(alias="from")
@@ -61,6 +63,11 @@ class TopicPreparationRequest(BaseModel):
     condition: int
     history: list[ConversationMessage] = Field(default_factory=list)
 
+class ConfirmTopicsRequest(BaseModel):
+    participant_id: str
+    condition: int
+    selected_topics: list[str] = Field(min_length=3, max_length=3)
+
 @router.post("/opening-message")
 async def opening_message(request: OpeningMessageRequest):
 
@@ -74,30 +81,42 @@ async def opening_message(request: OpeningMessageRequest):
 
  
     system_prompt = """
-    You are a warm, approachable conversational companion helping
-    someone think about cancer clinical trials.
+    You are a friendly, down-to-earth conversational
+    companion helping someone think through what's important
+    to them about cancer clinical trials.
 
-    Respond like a friendly, down-to-earth person having a natural
-    conversation, not a counselor or medical professional.
-    Use everyday language and natural expressions.
+    Your job is to briefly reflect back what the person shared
+    so they can tell whether you understood them correctly.
 
-    Briefly acknowledge and validate the concerns the participant has shared
-    in one warm, casual, and natural sentence.
+    PERSONALITY AND STYLE:
+    - Sound like a real person chatting casually, not a counselor,
+    educator, receptionist, or customer service representative.
+    - Be VERY conversational, relaxed, and informal.
+    - Use everyday spoken language, contractions, and simple words.
+    - Start with phrases such as "So you're wondering...",
+    "You wanna know...", or "Basically..."
+    - It's okay to use sentence fragments.
+    - Don't sound overly polished, scripted, or clinical.
+    - Avoid formal phrases like "I understand your concerns,"
+    "Thank you for sharing," "Regarding your question,"
+    "It sounds as though," or "clinical trial participation."
+    - Don't use exaggerated slang, forced enthusiasm, or
+    overly familiar language.
 
-    Consider the full conversation history, not just the latest message.
-    When multiple concerns have been raised, acknowledge them together
-    without repeating previous responses or going into detail.
+    WHAT TO SAY:
+    - Summarize the person's main questions or concerns,
+    in your own words, as if checking your understanding.
+    - Focus on what they actually said.
+    - If they mentioned multiple things, bring them together
+    naturally.
+    - Keep it to 1 or 2 short sentences, ideally under 30 words.
+    - Do not add a greeting or introductory filler.
+    - Do not ask a follow-up question. That will be added separately.
+    - Do not give medical advice or explain clinical trial information.
+    - Do not make assumptions about their experiences or feelings.
+    - Do not claim personal experiences of your own.
 
-    Do not assume how the participant feels, make assumptions about their
-    personal circumstances, or imply you have shared experiences.
-
-    Do not ask questions, explain clinical trials, offer advice,
-    or introduce new concerns.
-
-    Use a warm, relaxed, and down-to-earth conversational style,
-    like a friendly peer chatting with someone.
-    Write the way someone would actually say this out loud,
-    not the way they would write it in an email or report.
+    Keep the response natural, specific, and brief.
     """
 
 
@@ -128,17 +147,9 @@ async def opening_message(request: OpeningMessageRequest):
 
     response_text = (completion.choices[0].message.content or "").strip()
 
-    follow_up = (
-        "Before we move along, is there anything else you'd like to share "
-        "that would be important to you when talking about clinical trial participation? "
-        "If not, you can click the Continue button below!"
-    )
-
-    final_text = f"{response_text} {follow_up}"
-
     return {
         "speaker": speaker,
-        "response": final_text,
+        "response": response_text,
     }
 
 
@@ -268,5 +279,49 @@ async def prepare_topics(request: TopicPreparationRequest):
         "spoken_summary": spoken_summary,
     }
 
+@router.post("/confirm-topics")
+async def confirm_topics(request: ConfirmTopicsRequest):
 
+    valid_topics = {
+        topic["id"]: topic
+        for topic in STUDY_TOPICS
+    }
 
+    # Confirm exactly three different, valid topics.
+    if len(set(request.selected_topics)) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Please select three different topics."
+        )
+
+    if any(
+        topic_id not in valid_topics
+        for topic_id in request.selected_topics
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="One or more selected topics are invalid."
+        )
+
+    # Preserve the participant's chosen order.
+    confirmed_topics = [
+        valid_topics[topic_id]
+        for topic_id in request.selected_topics
+    ]
+
+    # Initialize this participant's topic conversation.
+    study_sessions[request.participant_id] = {
+        "condition": request.condition,
+        "topics": confirmed_topics,
+        "current_topic_index": 0,
+        "phase": "topics",
+        "conversation_complete": False,
+    }
+
+    return {
+        "status": "ready",
+        "phase": "topics",
+        "current_topic_index": 0,
+        "conversation_complete": False,
+        "topics": confirmed_topics,
+    }

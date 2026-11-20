@@ -1,4 +1,11 @@
+
 .env
 fastapirashi/
 __pycache__/
 rag_questions.json
+
+# macOS metadata
+.DS_Store
+
+# Python bytecode
+*.py[cod]
