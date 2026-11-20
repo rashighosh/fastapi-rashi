@@ -120,27 +120,23 @@ async def opening_message(request: OpeningMessageRequest):
     """
 
 
-    conversation_history = []
+    # Only include what the participant actually shared.
+    # This matches the simpler approach used by Alex.
 
-    for item in request.history:
-        if item.from_.lower() in ("user", "participant"):
-            role = "user"
-        elif item.from_.lower() in ("alex", "jordan"):
-            role = "assistant"
-        else:
-            continue
-
-        conversation_history.append({
-            "role": role,
-            "content": item.text,
-        })
+    user_messages = [
+        item.text
+        for item in request.history
+        if item.from_.lower() in ("user", "participant")
+    ]
     
     completion = await client.chat.completions.create(
         model=MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
-            *conversation_history,
-            {"role": "user", "content": request.message},
+            {
+                "role": "user",
+                "content": "\n".join(user_messages) or request.message,
+            },
         ],
         temperature=0.5,
     )
@@ -203,7 +199,7 @@ async def prepare_topics(request: TopicPreparationRequest):
     - Avoid claiming a topic addresses a concern if it does not.
     - Speak directly to the participant using "you," not "the participant."
     - Use clear, professional, approachable language.
-    - Be no more than 45 words.
+    - Use no more than 75 words.
 
     Return exactly four lines in this format:
     topic_id | brief explanation
