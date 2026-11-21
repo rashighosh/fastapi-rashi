@@ -402,7 +402,7 @@ async def tts(request: TTSRequest):
 
     character = request.character
 
-    character_voice = "af_heart"
+    character_voice = "am_liam"
     voice_speed = 1.2
 
     if character == "companion":
