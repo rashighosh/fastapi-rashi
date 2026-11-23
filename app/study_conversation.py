@@ -5,6 +5,7 @@ import os
 import re
 import json
 from pathlib import Path
+from typing import Literal
 
 router = APIRouter(prefix="/study", tags=["Study Conversation"])
 
@@ -76,6 +77,23 @@ class TopicPreparationRequest(BaseModel):
     participant_id: str
     condition: int
     history: list[ConversationMessage] = Field(default_factory=list)
+
+class TopicRecommendation(BaseModel):
+    topic_id: Literal[
+        "cost",
+        "support",
+        "logistics",
+        "doctor",
+        "side_effects",
+        "quality",
+    ]
+    explanation: str
+    user_excerpt: str | None
+
+
+class TopicSelectionResponse(BaseModel):
+    topics: list[TopicRecommendation] = Field(min_length=3, max_length=3)
+    spoken_summary: str
 
 class ConfirmTopicsRequest(BaseModel):
     participant_id: str
@@ -166,6 +184,7 @@ async def prepare_topics(request: TopicPreparationRequest):
     )
     
     
+    
     system_prompt = f"""
     You are a professional clinical trials educator.
 
@@ -177,24 +196,41 @@ async def prepare_topics(request: TopicPreparationRequest):
 
     For each selected topic:
     - Choose based on the participant's actual concerns or needs.
-    - Identify the number of the most relevant participant message.
-    - Use NONE if there is no clear connection.
+    - Use only the topic IDs from AVAILABLE TOPICS.
+    - Provide a brief explanation of why the topic is relevant.
+    - Identify the specific concern or need from the participant's
+      response that motivated your selection.
+    - Write a short, topic-specific user_excerpt capturing that concern.
+    - Use the participant's own wording when possible.
+    - Do not include unrelated concerns in the excerpt.
+    - Do not invent or assume information the participant did not express.
+    - If there is no clear connection, set user_excerpt to null.
+    - Select three different topics.
 
-    Also write a brief, professional recommendation that:
+    Also write a brief, professional spoken_summary that:
     - Explicitly names all three topics using their exact names.
     - Briefly explains how they relate to the participant's concerns.
     - Does not invent concerns the participant hasn't expressed.
+    - Sounds like a clinician making a professional suggestion.
+    - Directly addresses the participant.
 
-    Return exactly four lines:
+    Return ONLY a valid JSON object with this structure:
 
-    topic_id | brief explanation | message number or NONE
-    topic_id | brief explanation | message number or NONE
-    topic_id | brief explanation | message number or NONE
-    SUMMARY | brief recommendation
+    {{
+      "topics": [
+        {{
+          "topic_id": "cost",
+          "explanation": "Brief explanation",
+          "user_excerpt": "Specific participant concern or null"
+        }}
+      ],
+      "spoken_summary": "Brief professional recommendation"
+    }}
 
-    Do not include any additional text.
+    The topics array must contain exactly three objects.
+    Use null (without quotes) when no relevant user excerpt exists.
+    Do not include markdown, code fences, or additional text.
     """
-
 
     completion = await client.chat.completions.create(
         model=MODEL,
@@ -218,61 +254,39 @@ async def prepare_topics(request: TopicPreparationRequest):
     print(repr(result))
     print("=========================================\n")
 
-    spoken_summary = ""
-
-    for line in result.splitlines():
-        if line.startswith("SUMMARY |"):
-            spoken_summary = line.split("|", 1)[1].strip()
-            break
-
-    valid_topics = {topic["id"]: topic for topic in STUDY_TOPICS}
-    selected_topics = []
-
     
-    for line in result.splitlines():
-        parts = line.split("|", 2)
+    # Parse and validate the LLM's JSON response.
+    try:
+        parsed = TopicSelectionResponse.model_validate_json(result)
+    except Exception as e:
+        print("Topic selection validation failed:", e)
+        raise HTTPException(
+            status_code=502,
+            detail="Could not generate valid topic recommendations."
+        )
 
-        if len(parts) != 3:
-            continue
+    # Ensure all three recommended topics are different.
+    topic_ids = [topic.topic_id for topic in parsed.topics]
 
-        topic_id = parts[0].strip()
-        explanation = parts[1].strip()
-        message_index = parts[2].strip()
+    if len(set(topic_ids)) != 3:
+        raise HTTPException(
+            status_code=502,
+            detail="The model returned duplicate topics."
+        )
 
-        # Retrieve the original participant message by its index.
-        # Never rely on the LLM to reproduce the participant's words.
-        if message_index.isdigit():
-            index = int(message_index)
-            excerpt = user_messages[index] if index < len(user_messages) else None
-        else:
-            excerpt = None
+    # Convert validated recommendations into the existing frontend format.
+    valid_topics = {topic["id"]: topic for topic in STUDY_TOPICS}
 
-        if (
-            topic_id in valid_topics
-            and topic_id not in [topic["id"] for topic in selected_topics]
-            and explanation
-        ):
-            selected_topics.append({
-                **valid_topics[topic_id],
-                "explanation": explanation,
-                "user_excerpt": excerpt,
-            })
+    selected_topics = [
+        {
+            **valid_topics[topic.topic_id],
+            "explanation": topic.explanation,
+            "user_excerpt": topic.user_excerpt,
+        }
+        for topic in parsed.topics
+    ]
 
-        if len(selected_topics) == 3:
-            break
-
-
-    # Fallback if fewer than three valid topics were returned
-    for topic in STUDY_TOPICS:
-        if len(selected_topics) == 3:
-            break
-
-        if topic["id"] not in [item["id"] for item in selected_topics]:
-            selected_topics.append({
-                **topic,
-                "explanation": "This is another area you may find useful to explore.",
-                "user_excerpt": None,
-            })
+    spoken_summary = parsed.spoken_summary
 
     study_sessions[request.participant_id] = {
         "condition": request.condition,
@@ -327,6 +341,7 @@ async def confirm_topics(request: ConfirmTopicsRequest):
 
         confirmed_topics.append({
             **valid_topics[topic_id],
+            "explanation": original.get("explanation") if original else None,
             "user_excerpt": original.get("user_excerpt") if original else None,
             "user_selected": original is None,
         })
@@ -376,40 +391,60 @@ async def topic_opening(request: TopicOpeningRequest):
     })
 
     system_prompt = """
-    You are a friendly, casual virtual companion.
+    You are a friendly, casual virtual companion helping
+    someone explore clinical trial participation.
 
-    Your role is to help someone explore their personal concerns,
-    circumstances, needs, and preferences when considering clinical trials.
+    Your role is to help participants express their personal
+    concerns, circumstances, needs, and preferences.
 
-    Ask one short, natural question about the CURRENT TOPIC.
+    Use very casual, natural spoken language, like a supportive peer.
 
-    Use relevant things the participant shared, but stay focused
-    on the current topic. Do not combine unrelated concerns.
-
-    Explore their perspective without assuming they want to
-    participate in a trial.
-
+    Do not assume the participant wants to join a trial.
     Do not provide factual information or medical advice.
-    Use VERY casual, information language.
+    Do not invent personal circumstances or concerns.
     """
 
-    opening_responses = session.get("opening_responses", [])
-
+    
     user_prompt = f"""
-    CURRENT TOPIC:
-    {topic_name}
+    CURRENT TOPIC RECOMMENDATION:
+    {json.dumps(topic, indent=2)}
 
     PARTICIPANT'S EARLIER RESPONSES:
-    {profile["opening_responses"]}
-    {profile["topic_responses"]}
+    {json.dumps(profile["opening_responses"])}
 
-    MESSAGE ASSOCIATED WITH THIS TOPIC:
-    {user_excerpt or 'None'}
+    PARTICIPANT'S RESPONSES DURING PREVIOUS TOPICS:
+    {json.dumps(profile["topic_responses"])}
 
-    Ask one very casual question exploring the participant's
-    perspective on the current topic.
+    Your task is to begin a conversation about the current topic
+    by inviting the participant to share a relevant personal experience.
+
+    1. Briefly introduce the topic in one casual sentence.
+       Reference something the participant previously mentioned
+       about this topic when relevant.
+    2. Ask ONE short, open-ended question inviting the participant
+       to share a past or current experience from their healthcare,
+       treatment, or caregiving journey that relates to this topic.
+       Avoid a yes/no question so the user can share their experience.
+       The experience does not need to involve clinical trials.
+    3. If the participant has already shared a relevant experience,
+       invite them to elaborate on it rather than asking for a
+       different experience.
+
+    The topic recommendation contains:
+    - "name": The topic selected for discussion.
+    - "explanation": Alex's interpretation of why this topic is relevant.
+    - "user_excerpt": The specific participant concern Alex identified
+      as relevant to this topic (which may be paraphrased).
+
+    Use the user_excerpt to identify which concern to explore.
+    Refer to the participant's original responses for their actual wording.
+    Use Alex's explanation only as context for why the topic was selected.
+
+    Do not assume the participant has had a particular experience.
+    Do not require them to disclose personal information.
+    Do not introduce unrelated concerns or specific clinical trial details.
+    Do not repeat questions already answered.
     """
-
 
 
 
@@ -472,6 +507,77 @@ async def generate_study_search_query(topic_name: str, user_profile: dict):
     ).strip()
 
 
+async def generate_study_alex_response(
+    topic_context: dict,
+    factual_content: str,
+):
+    system_prompt = """
+    You are a professional clinical trials educator.
+
+    Your role is to provide clear, accurate information about
+    clinical trial participation, using trusted educational sources.
+
+    You are speaking after a virtual companion has helped the
+    participant share relevant healthcare experiences, personal
+    circumstances, priorities, or constraints.
+
+    Your task is to use that context to identify and explain
+    factual information that would be most relevant and useful
+    to the participant.
+
+    Use ONLY the provided FACTUAL CONTENT for factual claims.
+    Treat the participant's responses as personal context,
+    not as medical evidence.
+
+    Focus on the participant's expressed concerns and needs.
+    Do not simply repeat or summarize their experiences.
+    Do not invent personal circumstances or information needs.
+    Do not provide personalized medical advice.
+    Do not recommend specific trials or assess eligibility.
+    Do not assume the participant wants to join a trial.
+
+    If the factual content does not answer a relevant concern,
+    acknowledge the limitation rather than inventing an answer.
+
+    Use clear, professional language, as if you are a clinician
+    sharing credible information.
+    Keep your response concise and conversational.
+    Keep your response to 150 words or less.
+    Do not ask follow-up questions.
+    """
+
+    user_prompt = f"""
+    CURRENT TOPIC AND PARTICIPANT CONTEXT:
+    {json.dumps(topic_context, indent=2)}
+
+    RETRIEVED FACTUAL INFORMATION:
+    {factual_content}
+
+    Explain the factual information most relevant to the
+    participant's expressed needs as if you were having a conversation.
+    Do not use headers, bullet points, or lists.
+
+    Emphasize & relate information to what they shared so it is clear
+    to the user why this information is important for them to know.
+
+    Do not cover unrelated details simply because they
+    appear in the retrieved information.
+    """
+
+    completion = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+    )
+
+    return (
+        completion.choices[0].message.content or ""
+    ).strip()
+
+
 @router.post("/alex-topic-intro")
 async def alex_topic_intro(request: TopicOpeningRequest):
     from conversation_alex import (
@@ -499,11 +605,24 @@ async def alex_topic_intro(request: TopicOpeningRequest):
         "topic_responses": {},
     })
 
-    # Generate a retrieval query informed by the participant's needs.
+
+    # Organize the participant's information for the current topic.
+    topic_context = {
+        "topic_name": topic["name"],
+        "initial_concern": topic.get("user_excerpt"),
+        "participant_responses": user_profile.get(
+            "topic_responses", {}
+        ).get(topic["id"], []),
+    }
+
+
+    # Generate a retrieval query using the current topic's
+    # initial concern and Jordan-elicited participant responses.
     search_query = await generate_study_search_query(
         topic_name=topic["name"],
-        user_profile=user_profile,
+        user_profile=topic_context,
     )
+
 
     print("[STUDY ALEX RETRIEVAL QUERY]", search_query, flush=True)
 
@@ -518,17 +637,7 @@ async def alex_topic_intro(request: TopicOpeningRequest):
         current_topic=topic["name"],
         factual_content=factual_content,
         prior_summaries=[
-            *session.get("user_profile", {}).get(
-                "opening_responses",
-                session.get("opening_responses", [])
-            ),
-            *[
-                response
-                for responses in session.get("user_profile", {}).get(
-                    "topic_responses", {}
-                ).values()
-                for response in responses
-            ],
+            json.dumps(topic_context)
         ],
         topic_position="first" if topic_index == 0 else "middle",
         condition=session["condition"],
@@ -540,6 +649,68 @@ async def alex_topic_intro(request: TopicOpeningRequest):
         "topic_name": topic["name"],
         "alex_reply": introduction.reply,
     }
+
+
+@router.post("/alex-topic-response")
+async def alex_topic_response(request: TopicOpeningRequest):
+    from conversation_alex import generate_topic_factual_content
+
+    session = study_sessions.get(request.participant_id)
+
+    if not session or not session.get("topics"):
+        raise HTTPException(
+            status_code=404,
+            detail="No active study conversation found."
+        )
+
+    topic = session["topics"][session["current_topic_index"]]
+
+    profile = session.get("user_profile", {
+        "opening_responses": session.get("opening_responses", []),
+        "topic_responses": {},
+    })
+
+    # Organize the information relevant to this topic.
+    topic_context = {
+        "topic_name": topic["name"],
+        "initial_concern": topic.get("user_excerpt"),
+        "participant_responses": profile.get(
+            "topic_responses", {}
+        ).get(topic["id"], []),
+    }
+
+    # Generate a topic-specific retrieval query.
+    search_query = await generate_study_search_query(
+        topic_name=topic["name"],
+        user_profile=topic_context,
+    )
+
+    # Retrieve factual information from trusted sources.
+    factual_content = await generate_topic_factual_content(
+        f"{topic['name']}: {search_query}"
+    )
+
+    # Generate Alex's personalized factual response.
+    alex_reply = await generate_study_alex_response(
+        topic_context=topic_context,
+        factual_content=factual_content,
+    )
+
+    print("\n========== STUDY ALEX DEBUG ==========", flush=True)
+    print("TOPIC CONTEXT:", json.dumps(topic_context, indent=2), flush=True)
+    print("SEARCH QUERY:", search_query, flush=True)
+    print("RETRIEVED FACTUAL CONTENT:", factual_content, flush=True)
+    print("FINAL ALEX RESPONSE:", alex_reply, flush=True)
+    print("======================================\n", flush=True)
+
+
+    return {
+        "speaker": "Alex",
+        "topic_id": topic["id"],
+        "topic_name": topic["name"],
+        "alex_reply": alex_reply,
+    }
+
 
 
 class JordanTopicTurnRequest(BaseModel):
@@ -582,40 +753,90 @@ async def jordan_topic_turn(request: JordanTopicTurnRequest):
     topic_responses.append(message)
     save_study_sessions()
 
+
+    # The participant has answered Jordan's second question.
+    # Their response is already saved, so Alex can now take over.
+    if len(topic_responses) >= 2:
+        return {
+            "speaker": "Jordan",
+            "topic_id": topic["id"],
+            "jordan_reply": (
+                "Thanks for sharing all that! "
+                "I think Alex has some information that could be "
+                "helpful based on what you've shared. "
+                "Let's hear what he has to say."
+            ),
+            "elicitation_complete": True,
+            "user_profile": profile,
+        }
+
+
+    
     system_prompt = """
-    You are a friendly, casual virtual companion.
+    You are a friendly, casual virtual companion helping
+    someone explore what is important to them to know about clinical trial participation.
 
-    Your role is to help someone explore their personal concerns,
-    circumstances, needs, and preferences when considering clinical trials.
+    Your role is to help participants express and clarify their
+    information needs, hopes, expectations, and preferences.
 
-    Respond naturally to what the participant shared, and ask
-    one meaningful follow-up question when appropriate.
+    Use very casual, natural spoken language, like a supportive peer.
+    Keep responses brief and conversational.
 
-    Stay focused on the CURRENT TOPIC and build on what you've
-    already learned without repeating questions.
+    Acknowledge what the participant shares without assuming
+    how they feel or what they want.
 
-    Use VERY casual, informal spoken language. Keep responses brief.
-
-    Do not assume the participant wants to join a trial.
+    Do not assume the participant wants to join a clinical trial.
     Do not provide factual information or medical advice.
+    Do not invent personal circumstances or concerns.
     """
-
+    
     user_prompt = f"""
     CURRENT TOPIC:
-    {topic["name"]}
+    {json.dumps(topic, indent=2)}
 
-    PARTICIPANT'S OPENING RESPONSES:
-    {profile["opening_responses"]}
+    PARTICIPANT'S ORIGINAL RESPONSES TO THE OPENING QUESTION:
+    {json.dumps(profile["opening_responses"])}
 
-    PARTICIPANT'S RESPONSES ACROSS TOPICS:
-    {profile["topic_responses"]}
+    PARTICIPANT'S RESPONSES DURING TOPIC DISCUSSIONS:
+    {json.dumps(profile["topic_responses"])}
 
     LATEST PARTICIPANT MESSAGE:
     {message}
 
-    Respond very casually and continue exploring the participant's
-    perspective on the current topic.
+    The participant was invited to share a relevant experience
+    from their healthcare, treatment, or caregiving journey.
+
+    Your task is to briefly acknowledge what they shared and
+    explore how their experience relates to what matters to them
+    about the current topic.
+
+    Choose ONE of the following approaches based on their response:
+
+    1. PERSONAL CIRCUMSTANCES:
+       Explore how their current situation relates to this topic.
+    2. PRIORITIES:
+       Explore what matters most to them when considering this topic.
+    3. CONSTRAINTS:
+       Explore any practical concerns or limitations that might
+       influence what would work for them.
+
+    Ask ONE short, natural follow-up question using the approach
+    that would help you learn something meaningful that is not
+    already clear from their responses.
+
+    Do not systematically ask about all three dimensions.
+    Do not repeat information or questions already addressed.
+
+    Focus on understanding the participant's personal needs
+    and preferences, not collecting detailed medical information.
+
+    Do not introduce specific clinical trial details, hypothetical
+    trial scenarios, or concerns the participant hasn't mentioned.
+    Do not assume the participant wants to participate in a trial.
+    Do not sound like you are trying to convince them a trial is the best option.
     """
+
+
 
 
     completion = await client.chat.completions.create(
