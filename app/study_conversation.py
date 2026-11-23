@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import os
 import re
+import json
+from pathlib import Path
 
 router = APIRouter(prefix="/study", tags=["Study Conversation"])
 
@@ -45,8 +47,20 @@ STUDY_TOPICS = [
     },
 ]
 
-study_sessions = {}
+SESSION_FILE = Path(__file__).resolve().parent / "study_sessions.json"
 
+def load_study_sessions():
+    if SESSION_FILE.exists():
+        with open(SESSION_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+study_sessions = load_study_sessions()
+
+def save_study_sessions():
+    with open(SESSION_FILE, "w") as f:
+        json.dump(study_sessions, f, indent=2)
 
 class ConversationMessage(BaseModel):
     from_: str = Field(alias="from")
@@ -82,46 +96,19 @@ async def opening_message(request: OpeningMessageRequest):
 
     speaker = "Alex" if request.condition == 2 else "Jordan"
 
- 
+
     system_prompt = """
-    You are a friendly, down-to-earth conversational
-    companion helping someone think through what's important
-    to them about cancer clinical trials.
+    You are friendly, casual virtual companion helping
+    someone explore what matters to them about clinical trials.
 
-    Your job is to briefly reflect back what the person shared
-    so they can tell whether you understood them correctly.
+    Briefly summarize the participant's main questions or concerns
+    in your own words, without adding assumptions.
 
-    PERSONALITY AND STYLE:
-    - Sound like a real person chatting casually, not a counselor,
-    educator, receptionist, or customer service representative.
-    - Be VERY conversational, relaxed, and informal.
-    - Use everyday spoken language, contractions, and simple words.
-    - Start with phrases such as "So you're wondering...",
-    "You wanna know...", or "Basically..."
-    - It's okay to use sentence fragments.
-    - Don't sound overly polished, scripted, or clinical.
-    - Avoid formal phrases like "I understand your concerns,"
-    "Thank you for sharing," "Regarding your question,"
-    "It sounds as though," or "clinical trial participation."
-    - Don't use exaggerated slang, forced enthusiasm, or
-    overly familiar language.
+    Use VERY casual, informal spoken language.
+    Keep it to 1-2 short sentences.
 
-    WHAT TO SAY:
-    - Summarize the person's main questions or concerns,
-    in your own words, as if checking your understanding.
-    - Focus on what they actually said.
-    - If they mentioned multiple things, bring them together
-    naturally.
-    - Keep it to 1 or 2 short sentences, ideally under 30 words.
-    - Do not add a greeting or introductory filler.
-    - Do not ask a follow-up question. That will be added separately.
-    - Do not give medical advice or explain clinical trial information.
-    - Do not make assumptions about their experiences or feelings.
-    - Do not claim personal experiences of your own.
-
-    Keep the response natural, specific, and brief.
+    Do not ask questions or provide factual information.
     """
-
 
     # Only include what the participant actually shared.
     # This matches the simpler approach used by Alex.
@@ -172,64 +159,42 @@ async def prepare_topics(request: TopicPreparationRequest):
         f"{topic['id']}: {topic['name']}"
         for topic in STUDY_TOPICS
     )
+
+    numbered_user_messages = "\n".join(
+        f"{i}: {message}"
+        for i, message in enumerate(user_messages)
+    )
+    
     
     system_prompt = f"""
-    You are Dr. Alex, an informational virtual human helping someone
-    learn about cancer clinical trials.
+    You are a professional clinical trials educator.
 
-    Based on the participant's expressed concerns, questions, and
-    personal circumstances, select three relevant education topics.
+    Based on the participant's responses, select the three
+    most relevant educational topics.
 
-    Available topics:
+    AVAILABLE TOPICS:
     {topic_options}
 
-    Instructions:
-    - First identify the participant's distinct questions, concerns,
-    and information needs across all their messages.
-    - Select three topics most relevant to those needs.
-    - For each topic, identify a meaningful verbatim excerpt from
-    the participant's words that motivated the selection.
-    - Preserve enough context to capture their intended meaning.
-    - If no clear connection exists, use NONE.
-    - Do not invent or assume concerns the participant didn't express.
+    For each selected topic:
+    - Choose based on the participant's actual concerns or needs.
+    - Identify the number of the most relevant participant message.
+    - Use NONE if there is no clear connection.
 
-    After selecting three topics, write one brief, natural sentence
-    that Dr. Alex can say directly to the participant.
-    Use very formal, clear, and professional language, as a knowledgeable physician explaining their recommendation.
-    The sentence should:
-    - Acknowledge what the participant actually shared.
-    - Briefly explain how the selected topics relate to their concerns.
-    - Mention the three selected topics naturally, without sounding like a list.
-    - Avoid claiming a topic addresses a concern if it does not.
-    - Speak directly to the participant using "you," not "the participant."
-    - Use clear, professional, approachable language.
-    - Use no more than 75 words.
+    Also write a brief, professional recommendation that:
+    - Explicitly names all three topics using their exact names.
+    - Briefly explains how they relate to the participant's concerns.
+    - Does not invent concerns the participant hasn't expressed.
 
-        For each selected topic, also identify the exact words or
-        phrase from the participant's original responses that
-        made you select that topic.
+    Return exactly four lines:
 
-        Rules for identifying relevant phrases:
-        - Copy the participant's words EXACTLY as written.
-        - Do not paraphrase, summarize, or correct their wording.
-        - Select the shortest meaningful excerpt that captures
-        their relevant question, concern, or information need.
-        - The excerpt must appear verbatim in the participant's
-        original messages.
-        - Multiple topics may map to the same excerpt if relevant.
-        - If the participant did not directly mention something
-        relevant to a selected topic, return NONE.
-        - Never invent a concern or attribute something to
-        the participant that they did not actually express.
+    topic_id | brief explanation | message number or NONE
+    topic_id | brief explanation | message number or NONE
+    topic_id | brief explanation | message number or NONE
+    SUMMARY | brief recommendation
 
-        Return exactly four lines in this format:
-        topic_id | brief explanation | exact participant excerpt or NONE
-        topic_id | brief explanation | exact participant excerpt or NONE
-        topic_id | brief explanation | exact participant excerpt or NONE
-        SUMMARY | one conversational sentence
+    Do not include any additional text.
+    """
 
-        Do not include introductions or additional text.
-        """
 
     completion = await client.chat.completions.create(
         model=MODEL,
@@ -237,7 +202,7 @@ async def prepare_topics(request: TopicPreparationRequest):
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": "\n".join(user_messages) or "No concerns provided.",
+                "content": numbered_user_messages or "No concerns provided.",
             },
         ],
         temperature=0,
@@ -272,14 +237,14 @@ async def prepare_topics(request: TopicPreparationRequest):
 
         topic_id = parts[0].strip()
         explanation = parts[1].strip()
-        excerpt = parts[2].strip()
+        message_index = parts[2].strip()
 
-        # Only preserve excerpts that appear verbatim
-        # in one of the participant's original messages.
-        if (
-            excerpt == "NONE"
-            or not any(excerpt in message for message in user_messages)
-        ):
+        # Retrieve the original participant message by its index.
+        # Never rely on the LLM to reproduce the participant's words.
+        if message_index.isdigit():
+            index = int(message_index)
+            excerpt = user_messages[index] if index < len(user_messages) else None
+        else:
             excerpt = None
 
         if (
@@ -314,6 +279,7 @@ async def prepare_topics(request: TopicPreparationRequest):
         "opening_responses": user_messages,
         "prepared_topics": selected_topics,
     }
+    save_study_sessions()
  
     return {
         "status": "ready",
@@ -374,6 +340,7 @@ async def confirm_topics(request: ConfirmTopicsRequest):
         "phase": "topics",
         "conversation_complete": False,
     }
+    save_study_sessions()
 
     return {
         "status": "ready",
@@ -401,38 +368,50 @@ async def topic_opening(request: TopicOpeningRequest):
     topic_name = topic["name"]
     user_excerpt = topic.get("user_excerpt")
 
+    # Initialize the shared participant profile from opening elicitation.
+    # Preserve any responses collected during earlier topics.
+    profile = session.setdefault("user_profile", {
+        "opening_responses": session.get("opening_responses", []),
+        "topic_responses": {},
+    })
+
     system_prompt = """
-    You are Jordan, a friendly, informal conversational companion
-    helping someone explore information about cancer clinical trials.
+    You are a friendly, casual virtual companion.
 
-    Your task is to ask ONE short, natural question inviting the
-    participant to share more about the current topic.
+    Your role is to help someone explore their personal concerns,
+    circumstances, needs, and preferences when considering clinical trials.
 
-    STYLE:
-    - Be VERY informal and casual
-    - Use everyday spoken language, contractions, and simple words.
-    - Sound spontaneous, not polished or scripted.
-    - Use phrases like "So earlier you mentioned...",
-    "You were saying...", "Wanna tell me a little more about that?"
-    - Avoid formal phrases like "specific aspects",
-    "regarding", "could you elaborate", or "most curious about".
-    - Don't force slang or exaggerated enthusiasm.
+    Ask one short, natural question about the CURRENT TOPIC.
 
-    TASK:
-   - Briefly bring up what the person said earlier, if available.
-    - Casually invite them to share a little more about it.
-    - If nothing was mentioned, ask what they'd like to know.
-    - Don't assume anything about their situation or feelings.
-    - Don't provide information or medical advice.
-    - Keep it to 1-2 short sentences and one question.
+    Use relevant things the participant shared, but stay focused
+    on the current topic. Do not combine unrelated concerns.
+
+    Explore their perspective without assuming they want to
+    participate in a trial.
+
+    Do not provide factual information or medical advice.
+    Use VERY casual, information language.
     """
+
+    opening_responses = session.get("opening_responses", [])
 
     user_prompt = f"""
-    Current topic: {topic_name}
-    Participant's earlier words: {user_excerpt or 'Not available'}
+    CURRENT TOPIC:
+    {topic_name}
 
-    Generate Jordan's opening question.
+    PARTICIPANT'S EARLIER RESPONSES:
+    {profile["opening_responses"]}
+    {profile["topic_responses"]}
+
+    MESSAGE ASSOCIATED WITH THIS TOPIC:
+    {user_excerpt or 'None'}
+
+    Ask one very casual question exploring the participant's
+    perspective on the current topic.
     """
+
+
+
 
     completion = await client.chat.completions.create(
         model=MODEL,
@@ -453,4 +432,325 @@ async def topic_opening(request: TopicOpeningRequest):
         "topic_name": topic_name,
         "user_excerpt": user_excerpt,
         "jordan_reply": jordan_reply,
+    }
+
+
+async def generate_study_search_query(topic_name: str, user_profile: dict):
+    
+    system_prompt = """
+    Generate one search query for a clinical trial education
+    vector database.
+
+    Use the current topic and any directly relevant concerns,
+    needs, or circumstances the participant expressed.
+
+    Focus on the current topic. Do not invent information.
+
+    Return only the search query.
+    """
+
+
+    completion = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"""
+                CURRENT TOPIC: {topic_name}
+
+                PARTICIPANT CONTEXT:
+                {json.dumps(user_profile)}
+                """,
+            },
+        ],
+        temperature=0,
+    )
+
+    return (
+        completion.choices[0].message.content or topic_name
+    ).strip()
+
+
+@router.post("/alex-topic-intro")
+async def alex_topic_intro(request: TopicOpeningRequest):
+    from conversation_alex import (
+        generate_topic_factual_content,
+        generate_alex_topic_intro,
+    )
+
+    session = study_sessions.get(request.participant_id)
+
+    if not session or not session.get("topics"):
+        raise HTTPException(
+            status_code=404,
+            detail="No confirmed topics found for this participant."
+        )
+
+    topic_index = session["current_topic_index"]
+    topic = session["topics"][topic_index]
+
+    # Information the participant shared during opening elicitation
+    opening_responses = session.get("opening_responses", [])
+
+    # Retrieve the participant's shared context.
+    user_profile = session.get("user_profile", {
+        "opening_responses": session.get("opening_responses", []),
+        "topic_responses": {},
+    })
+
+    # Generate a retrieval query informed by the participant's needs.
+    search_query = await generate_study_search_query(
+        topic_name=topic["name"],
+        user_profile=user_profile,
+    )
+
+    print("[STUDY ALEX RETRIEVAL QUERY]", search_query, flush=True)
+
+    # Retrieve relevant factual information from the existing vector store.
+    factual_content = await generate_topic_factual_content(
+        f"{topic['name']}: {search_query}"
+    )
+
+    # Generate a brief introduction using the retrieved evidence
+    # and the participant's earlier stated needs
+    introduction = await generate_alex_topic_intro(
+        current_topic=topic["name"],
+        factual_content=factual_content,
+        prior_summaries=[
+            *session.get("user_profile", {}).get(
+                "opening_responses",
+                session.get("opening_responses", [])
+            ),
+            *[
+                response
+                for responses in session.get("user_profile", {}).get(
+                    "topic_responses", {}
+                ).values()
+                for response in responses
+            ],
+        ],
+        topic_position="first" if topic_index == 0 else "middle",
+        condition=session["condition"],
+    )
+
+    return {
+        "speaker": "Alex",
+        "topic_id": topic["id"],
+        "topic_name": topic["name"],
+        "alex_reply": introduction.reply,
+    }
+
+
+class JordanTopicTurnRequest(BaseModel):
+    participant_id: str
+    message: str
+
+
+@router.post("/jordan-topic-turn")
+async def jordan_topic_turn(request: JordanTopicTurnRequest):
+    session = study_sessions.get(request.participant_id)
+
+    if not session or not session.get("topics"):
+        raise HTTPException(
+            status_code=404,
+            detail="No active study conversation found."
+        )
+
+    topic_index = session["current_topic_index"]
+    topic = session["topics"][topic_index]
+    message = request.message.strip()
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty."
+        )
+
+    # Initialize the profile using the opening elicitation.
+    profile = session.setdefault("user_profile", {
+        "opening_responses": session.get("opening_responses", []),
+        "topic_responses": {}
+    })
+
+    # Preserve the participant's actual words under this topic.
+    topic_responses = profile["topic_responses"].setdefault(
+        topic["id"], []
+    )
+
+    previous_responses = list(topic_responses)
+    topic_responses.append(message)
+    save_study_sessions()
+
+    system_prompt = """
+    You are a friendly, casual virtual companion.
+
+    Your role is to help someone explore their personal concerns,
+    circumstances, needs, and preferences when considering clinical trials.
+
+    Respond naturally to what the participant shared, and ask
+    one meaningful follow-up question when appropriate.
+
+    Stay focused on the CURRENT TOPIC and build on what you've
+    already learned without repeating questions.
+
+    Use VERY casual, informal spoken language. Keep responses brief.
+
+    Do not assume the participant wants to join a trial.
+    Do not provide factual information or medical advice.
+    """
+
+    user_prompt = f"""
+    CURRENT TOPIC:
+    {topic["name"]}
+
+    PARTICIPANT'S OPENING RESPONSES:
+    {profile["opening_responses"]}
+
+    PARTICIPANT'S RESPONSES ACROSS TOPICS:
+    {profile["topic_responses"]}
+
+    LATEST PARTICIPANT MESSAGE:
+    {message}
+
+    Respond very casually and continue exploring the participant's
+    perspective on the current topic.
+    """
+
+
+    completion = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.5,
+    )
+
+    jordan_reply = (
+        completion.choices[0].message.content or ""
+    ).strip()
+
+    return {
+        "speaker": "Jordan",
+        "topic_id": topic["id"],
+        "jordan_reply": jordan_reply,
+        "user_profile": profile,
+    }
+
+
+class AlexTopicTurnRequest(BaseModel):
+    participant_id: str
+    message: str
+    history: list[ConversationMessage] = Field(default_factory=list)
+
+
+@router.post("/alex-topic-turn")
+async def alex_topic_turn(request: AlexTopicTurnRequest):
+    from conversation_alex import (
+        ConversationAlexRequest,
+        ConversationMessage as AlexConversationMessage,
+        conversation_alex,
+    )
+
+    session = study_sessions.get(request.participant_id)
+
+    if not session or not session.get("topics"):
+        raise HTTPException(
+            status_code=404,
+            detail="No active study conversation found."
+        )
+
+    message = request.message.strip()
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty."
+        )
+
+    topic = session["topics"][session["current_topic_index"]]
+
+    # Retrieve participant-expressed context from Jordan's conversations.
+    profile = session.get("user_profile", {
+        "opening_responses": session.get("opening_responses", []),
+        "topic_responses": {},
+    })
+
+    participant_context = [
+        *profile.get("opening_responses", []),
+        *[
+            response
+            for responses in profile.get("topic_responses", {}).values()
+            for response in responses
+        ],
+    ]
+
+    # Reuse Alex's existing vector-store question-answering pipeline.
+    alex_request = ConversationAlexRequest(
+        message=message,
+        history=[
+            AlexConversationMessage.model_validate(
+                item.model_dump(by_alias=True)
+            )
+            for item in request.history
+        ],
+        earlier_memory=f"Current discussion topic: {topic['name']}",
+        prior_topic_summaries=participant_context,
+        condition=session.get("condition", 3),
+    )
+
+    result = await conversation_alex(alex_request)
+
+    return {
+        "speaker": "Alex",
+        "topic_id": topic["id"],
+        "topic_name": topic["name"],
+        "alex_reply": result["answer"],
+    }
+
+
+@router.post("/advance-topic")
+async def advance_study_topic(request: TopicOpeningRequest):
+    session = study_sessions.get(request.participant_id)
+
+    if not session or not session.get("topics"):
+        raise HTTPException(
+            status_code=404,
+            detail="No confirmed topics found for this participant."
+        )
+
+    if session.get("conversation_complete"):
+        raise HTTPException(
+            status_code=400,
+            detail="The conversation is already complete."
+        )
+
+    previous_index = session["current_topic_index"]
+    next_index = previous_index + 1
+
+    # Participant has completed all three topics.
+    if next_index >= len(session["topics"]):
+        session["conversation_complete"] = True
+        session["phase"] = "complete"
+        save_study_sessions()
+
+        return {
+            "conversation_complete": True,
+            "current_topic_index": previous_index,
+            "completed_topic_number": previous_index + 1,
+            "phase": "complete",
+            "topics": session["topics"],
+        }
+
+    # Advance to the next confirmed topic.
+    session["current_topic_index"] = next_index
+    save_study_sessions()
+
+    return {
+        "conversation_complete": False,
+        "current_topic_index": next_index,
+        "completed_topic_number": previous_index + 1,
+        "phase": "topics",
+        "topics": session["topics"],
     }
