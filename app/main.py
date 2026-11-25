@@ -317,6 +317,7 @@ from typing import Literal
 class TTSRequest(BaseModel):
     text: str
     character: str
+    companion: str | None = None
 
 class QueryPreprocess(BaseModel):
     route: Literal[
@@ -403,11 +404,13 @@ async def tts(request: TTSRequest):
     character = request.character
 
     character_voice = "am_liam"
-    voice_speed = 1.2
+    voice_speed = 1.1
 
     if character == "companion":
-        character_voice = "am_echo"
-        voice_speed = 1.2
+        if request.companion in ["jordan1", "jordan2"]:
+            character_voice = "af_heart"
+        else:
+            character_voice = "am_echo"
 
     print(
         "[TTS INPUT]",
