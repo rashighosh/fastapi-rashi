@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any
 import time
+from conversation_personas import INFORMATIONAL_PERSONA
 
 # Router stuff
 router = APIRouter(

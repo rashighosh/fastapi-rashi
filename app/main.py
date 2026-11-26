@@ -12,7 +12,10 @@ from conversation_alex import (
     router as conversation_alex_router,
     configure_conversation_alex,
 )
-from study_conversation import router as study_router
+from study_conversation import (
+    router as study_router,
+    configure_study_conversation,
+)
 from logging_routes_conversation import (
     router as logging_conversation_router,
 )
@@ -574,6 +577,12 @@ configure_conversation_alex(
     rag_instance=rag,
     chat_client=client_chat,
     model=UF_LOCAL_MODEL,
+    preprocess_func=preprocess_question,
+    clean_alex_answer_func=clean_alex_answer,
+)
+
+configure_study_conversation(
+    rag_instance=rag,
     preprocess_func=preprocess_question,
     clean_alex_answer_func=clean_alex_answer,
 )

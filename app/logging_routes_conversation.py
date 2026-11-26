@@ -57,6 +57,10 @@ class ConversationEnteredLog(BaseModel):
     c: int
     condition_name: str
 
+class CompanionSelectedLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    selected_companion: str = Field(min_length=1)
+
 class SelectedTopicsLog(BaseModel):
     participant_id: str = Field(min_length=1)
     selected_topics: list[str]
@@ -101,6 +105,18 @@ class ResourceRequestEventLog(BaseModel):
 
 class WebsiteFinishedLog(BaseModel):
     participant_id: str = Field(min_length=1)
+
+class OpeningCompletedLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    opening_responses: list[str]
+    opening_summary: str
+
+class SuggestedTopicsLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    suggested_topics: list[str] = Field(
+        min_length=3,
+        max_length=3,
+    )
 
 # ---------------------------------------------------------------------------
 # Entered conversation activity
@@ -177,6 +193,151 @@ def log_conversation_entered(body: ConversationEnteredLog):
         raise HTTPException(
             status_code=500,
             detail=f"Could not log conversation entry: {str(exc)}",
+        )
+
+# ---------------------------------------------------------------------------
+# Selected companion
+# ---------------------------------------------------------------------------
+
+@router.post("/log-companion-selected")
+def log_companion_selected(body: CompanionSelectedLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    selected_companion = ?,
+                    companion_selected_at = {EASTERN_TIME_SQL}
+                WHERE participant_id = ?
+                """,
+                body.selected_companion,
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "participant_id": body.participant_id,
+            "selected_companion": body.selected_companion,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-companion-selected] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log companion selection: {str(exc)}",
+        )
+
+# ---------------------------------------------------------------------------
+# Opening elicitation completed
+# ---------------------------------------------------------------------------
+
+@router.post("/log-opening-completed")
+def log_opening_completed(body: OpeningCompletedLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    opening_responses = ?,
+                    opening_summary = ?,
+                    opening_completed_at = {EASTERN_TIME_SQL}
+                WHERE participant_id = ?
+                """,
+                json.dumps(
+                    body.opening_responses,
+                    ensure_ascii=False,
+                ),
+                body.opening_summary,
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-opening-completed] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log opening completion: {str(exc)}",
+        )
+
+# ---------------------------------------------------------------------------
+# Suggested topics
+# ---------------------------------------------------------------------------
+
+@router.post("/log-suggested-topics")
+def log_suggested_topics(body: SuggestedTopicsLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    suggested_topic_1 = COALESCE(suggested_topic_1, ?),
+                    suggested_topic_2 = COALESCE(suggested_topic_2, ?),
+                    suggested_topic_3 = COALESCE(suggested_topic_3, ?),
+                    topics_suggested_at = COALESCE(
+                        topics_suggested_at,
+                        {EASTERN_TIME_SQL}
+                    )
+                WHERE participant_id = ?
+                """,
+                body.suggested_topics[0],
+                body.suggested_topics[1],
+                body.suggested_topics[2],
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-suggested-topics] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log suggested topics: {str(exc)}",
         )
 
 # ---------------------------------------------------------------------------
