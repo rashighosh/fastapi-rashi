@@ -477,6 +477,38 @@ async def confirm_topics(request: ConfirmTopicsRequest):
         "topics": confirmed_topics,
     }
 
+@router.post("/initialize-info-only")
+async def initialize_info_only(request: TopicOpeningRequest):
+    import random
+
+    existing_session = study_sessions.get(request.participant_id, {})
+
+    prepared_topics = existing_session.get("prepared_topics")
+
+    if not prepared_topics or existing_session.get("condition") != 1:
+        prepared_topics = [
+            {
+                **topic,
+                "explanation": None,
+                "user_excerpt": None,
+            }
+            for topic in random.sample(STUDY_TOPICS, 3)
+        ]
+
+        study_sessions[request.participant_id] = {
+            "condition": 1,
+            "opening_responses": [],
+            "prepared_topics": prepared_topics,
+        }
+
+        save_study_sessions()
+
+    return {
+        "status": "ready",
+        "opening_responses": [],
+        "selected_topics": prepared_topics,
+        "spoken_summary": "Here are three topics I suggest we explore to help you learn more about clinical trial participation.",
+    }
 
 @router.post("/topic-opening")
 async def topic_opening(request: TopicOpeningRequest):
@@ -702,6 +734,7 @@ async def generate_study_search_query(topic_name: str, user_profile: dict):
 async def generate_study_alex_response(
     topic_context: dict,
     factual_content: str,
+    condition: int = CONDITION_MULTIPLE,
 ):
     system_prompt = INFORMATIONAL_PERSONA + """
     Your task is to provide factual information about clinical trial
@@ -750,6 +783,40 @@ async def generate_study_alex_response(
     Do not cover unrelated details simply because they
     appear in the retrieved information.
     """
+
+    if condition == CONDITION_SINGLE_INFO:
+        system_prompt = INFORMATIONAL_PERSONA + """
+        Your task is to provide factual information about the current
+        topic related to clinical trial participation.
+
+        - Introduce the topic and explain its key points.
+        - Use ONLY the provided FACTUAL CONTENT for factual claims.
+        - Do not personalize the information based on individual circumstances.
+        - Do not imply that the participant previously shared personal concerns.
+        - Do not provide medical advice.
+        - Do not recommend specific trials or assess eligibility.
+        - Do not assume the individual wants to join a clinical trial.
+        - Do not overstate potential benefits or minimize potential risks.
+
+        Keep your response concise and conversational.
+        Use accessible language while maintaining a professional tone.
+        Keep your response to 150 words or less.
+        Do not ask follow-up questions.
+        """
+
+        user_prompt = f"""
+        CURRENT TOPIC:
+        {topic_context["topic_name"]}
+
+        RETRIEVED FACTUAL INFORMATION:
+        {factual_content}
+
+        Explain the key factual information about this topic
+        as if you were having a conversation.
+
+        Do not use headers, bullet points, or lists.
+        Do not cover unrelated details.
+        """
 
     completion = await client.chat.completions.create(
         model=MODEL,
@@ -854,33 +921,49 @@ async def alex_topic_response(request: TopicOpeningRequest):
         ).get(topic["id"], []),
     }
 
-    # Generate a topic-specific retrieval query.
-    search_query = await generate_study_search_query(
-        topic_name=topic["name"],
-        user_profile=topic_context,
-    )
+    condition = session["condition"]
+
+    # Generate a condition-specific retrieval query.
+    if condition == CONDITION_SINGLE_INFO:
+        search_query = topic["name"]
+    else:
+        search_query = await generate_study_search_query(
+            topic_name=topic["name"],
+            user_profile=topic_context,
+        )
 
     # Retrieve factual information from trusted sources.
     factual_content = await generate_topic_factual_content(
         f"{topic['name']}: {search_query}"
     )
 
-    # Generate Alex's personalized factual response.
+    # Generate Alex's factual response.
     alex_reply = await generate_study_alex_response(
         topic_context=topic_context,
         factual_content=factual_content,
+        condition=condition,
     )
 
     # Provide topic-specific navigation instructions.
     topic_closing_messages = [
-        "Alright, that's some of the information I thought would be most relevant "
-        "to you based on what you shared. You're welcome to continue asking me questions about this topic, or "
+        (
+            "Alright, those are some of the key points about this topic. "
+            if session.get("condition") == CONDITION_SINGLE_INFO
+            else
+            "Alright, that's some of the information I thought would be most relevant "
+            "to you based on what you shared. "
+        )
+        + "You're welcome to continue asking me questions about this topic, or "
         "whenever you are ready to move on, click the Next Topic button.",
 
-        "Okay, those are the particular points I wanted to highlight given what you "
-        "shared. Again, you can ask me anything else you'd like to know about this topic, "
-        ", or you can move on to the next topic "
-        "whenever you're ready.",
+        (
+            "Okay, those are the key points I wanted to highlight on this topic. "
+            if session.get("condition") == CONDITION_SINGLE_INFO
+            else
+            "Okay, those are the particular points I wanted to highlight given what you shared. "
+        )
+        + "Again, you can ask me anything else you'd like to know about this topic, "
+        "or you can move on to the next topic whenever you're ready.",
 
         "Alright, those are the key points I wanted to share with you "
         "on this topic. You're welcome to ask any additional questions about it "
