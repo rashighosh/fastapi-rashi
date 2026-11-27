@@ -181,6 +181,44 @@ class ConfirmTopicsRequest(BaseModel):
 class TopicOpeningRequest(BaseModel):
     participant_id: str
 
+class StudyClosingRequest(BaseModel):
+    participant_id: str
+    history: list[ConversationMessage] = Field(default_factory=list)
+
+class JordanClosingResponse(BaseModel):
+    reflection: str
+    discussion_questions: list[str] = Field(
+        min_length=3,
+        max_length=3
+    )
+    spoken_overview: str
+
+class AlexResourceRecommendation(BaseModel):
+    resource_id: Literal[
+        "featured-trials",
+        "personal-stories",
+        "sample-consent",
+        "questions-to-ask",
+        "details-checklist",
+        "finding-guide",
+        "nci-specialist",
+        "trial-search",
+    ]
+    explanation: str
+
+class AlexClosingResponse(BaseModel):
+    recommended_resources: list[AlexResourceRecommendation] = Field(
+        min_length=3,
+        max_length=3
+    )
+    spoken_overview: str
+
+class NextStepsSelectedRequest(BaseModel):
+    participant_id: str
+    questions_available: bool
+    questions_selected: bool
+    resources_selected: bool
+
 @router.post("/opening-message")
 async def opening_message(request: OpeningMessageRequest):
 
@@ -536,6 +574,15 @@ async def topic_opening(request: TopicOpeningRequest):
         completion.choices[0].message.content or ""
     ).strip()
 
+    # Provide a natural transition into each topic.
+    topic_opening_messages = [
+        "Alright, let's dive into the first topic!",
+        "Okay, time to move on to our next topic.",
+        "Alright, we're on the last topic!"
+    ]
+
+    jordan_reply = topic_opening_messages[topic_index] + " " + jordan_reply
+
     return {
         "speaker": "Jordan",
         "topic_id": topic["id"],
@@ -824,6 +871,26 @@ async def alex_topic_response(request: TopicOpeningRequest):
         factual_content=factual_content,
     )
 
+    # Provide topic-specific navigation instructions.
+    topic_closing_messages = [
+        "Alright, that's some of the information I thought would be most relevant "
+        "to you based on what you shared. You're welcome to continue asking me questions about this topic, or "
+        "whenever you are ready to move on, click the Next Topic button.",
+
+        "Okay, those are the particular points I wanted to highlight given what you "
+        "shared. Again, you can ask me anything else you'd like to know about this topic, "
+        ", or you can move on to the next topic "
+        "whenever you're ready.",
+
+        "Alright, those are the key points I wanted to share with you "
+        "on this topic. You're welcome to ask any additional questions about it "
+        "before we move on to concluding our conversation."
+    ]
+
+    alex_reply += " " + topic_closing_messages[
+        session["current_topic_index"]
+    ]
+
     print("\n========== STUDY ALEX DEBUG ==========", flush=True)
     print("TOPIC CONTEXT:", json.dumps(topic_context, indent=2), flush=True)
     print("SEARCH QUERY:", search_query, flush=True)
@@ -885,15 +952,23 @@ async def jordan_topic_turn(request: JordanTopicTurnRequest):
     # The participant has answered Jordan's second question.
     # Their response is already saved, so Alex can now take over.
     if len(topic_responses) >= 2:
+
+        handoff_messages = [
+            "Got it, thanks for talking through all that with me! "
+            "Let's see what info Doctor Alex has about it.",
+
+            "Alright, good to know! Now, let's hand it over to Doctor Alex again "
+            "to see what info might be helpful for you to know.",
+
+            "Okay, thanks for sharing that with me! "
+            "Let's hand it over to Doctor Alex one last time "
+            "to get some useful info."
+        ]
+
         return {
             "speaker": "Jordan",
             "topic_id": topic["id"],
-            "jordan_reply": (
-                "Thanks for sharing all that! "
-                "I think Alex has some information that could be "
-                "helpful based on what you've shared. "
-                "Let's hear what he has to say."
-            ),
+            "jordan_reply": handoff_messages[topic_index],
             "elicitation_complete": True,
             "user_profile": profile,
         }
@@ -1261,6 +1336,230 @@ async def alex_topic_turn(request: AlexTopicTurnRequest):
         "alex_reply": result["answer"],
     }
 
+@router.post("/jordan-closing")
+async def jordan_closing(request: StudyClosingRequest):
+
+    session = study_sessions.get(request.participant_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="No active study conversation found."
+        )
+
+    system_prompt = SUPPORTIVE_PERSONA + """
+    Your task is to conclude a conversation about clinical trial
+    participation by helping the individual prepare for potential
+    future conversations with people they trust.
+
+    Generate three things:
+
+    1. CLOSING REFLECTION
+    - Briefly acknowledge the perspectives and experiences
+      the individual shared throughout the conversation.
+    - Reflect what matters to them personally.
+    - Keep it warm, casual, and conversational.
+    - Use no more than 2-3 short sentences.
+    - Do not evaluate their decisions or assume how they feel.
+    - Do not introduce new information or ask a follow-up question.
+
+    2. DISCUSSION QUESTIONS
+    - Generate 3 personalized questions that the individual
+      could discuss with family, friends, or healthcare providers.
+    - Ground each question in the individual's expressed needs,
+      concerns, experiences, or priorities.
+    - Help them explore what matters to them and what they
+      may want to understand or consider further.
+    - Write the questions from the individual's perspective,
+      using first-person language where appropriate.
+    - Keep each question concise and easy to understand.
+    - Keep each question under 20 words.
+    - Do not assume they want to participate in a clinical trial.
+    - Do not provide medical advice or recommend a decision.
+    - Do not invent personal circumstances.
+
+    3. SPOKEN OVERVIEW
+    - Briefly introduce the three discussion questions you generated.
+    - Explain how they connect to what the individual shared.
+    - Highlight the main ideas behind the questions without
+      reading each question word for word.
+    - Speak directly to the individual in a warm, casual,
+      peer-like manner.
+    - Use 2-3 short sentences, no more than 50 words total.
+    - Do not ask a follow-up question or encourage trial participation.
+    - This overview will be spoken after the individual chooses
+      to view their questions.
+
+    The reflection should not mention or introduce the questions.
+    These will be introduced separately.
+    """ + INTERACTION_BOUNDARY
+
+    conversation_history = [
+        {
+            "speaker": message.from_,
+            "text": message.text
+        }
+        for message in request.history
+        if message.from_.lower() != "system"
+    ]
+
+    completion = await client.beta.chat.completions.parse(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": json.dumps(conversation_history)
+            }
+        ],
+        temperature=0.5,
+        response_format=JordanClosingResponse,
+    )
+
+    result = completion.choices[0].message.parsed
+
+    if result is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate closing reflection."
+        )
+
+    # Preserve the generated outputs in the study session.
+    session["closing_reflection"] = result.reflection
+    session["discussion_questions"] = result.discussion_questions
+    session["jordan_material_overview"] = result.spoken_overview
+
+    save_study_sessions()
+
+    return {
+        "speaker": "Jordan",
+        "reflection": result.reflection,
+        "discussion_questions": result.discussion_questions,
+        "spoken_overview": result.spoken_overview,
+    }
+
+@router.post("/alex-closing")
+async def alex_closing(request: StudyClosingRequest):
+
+    session = study_sessions.get(request.participant_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="No active study conversation found."
+        )
+
+    system_prompt = INFORMATIONAL_PERSONA + """
+    Your task is to identify additional educational resources
+    that may be relevant to the individual based on the entire
+    conversation.
+
+    AVAILABLE RESOURCES:
+
+    - featured-trials: Examples of clinical trials.
+    - personal-stories: Personal stories about clinical trial participation.
+    - sample-consent: An example clinical trial informed consent document.
+    - questions-to-ask: General questions to ask about clinical trials.
+    - details-checklist: A checklist of clinical trial details to consider.
+    - finding-guide: Guidance on how to find clinical trials.
+    - nci-specialist: Information about contacting an NCI information specialist.
+    - trial-search: A tool for independently exploring clinical trials.
+
+    Select exactly three different resources.
+
+    - Base your selections on the individual's expressed
+      questions, concerns, experiences, priorities, and needs.
+    - Prioritize resources that help them continue exploring
+      information relevant to their circumstances.
+    - Consider the entire conversation, not just the final topic.
+    - Provide one brief sentence explaining why each resource
+      may be relevant to the individual.
+    - Do not invent personal circumstances or information needs.
+    - Do not assume the individual wants to participate in a trial.
+    - Do not recommend specific clinical trials.
+    - Only select from the available resource IDs.
+
+    SPOKEN OVERVIEW:
+    - Briefly introduce all three selected resources.
+    - Refer to each resource using natural, descriptive language.
+    - NEVER say the internal resource IDs aloud.
+    - For example, say "a checklist of important clinical trial
+      details" instead of "details-checklist".
+    - Explain why each resource may be useful based on what
+      the individual shared during the conversation.
+    - Use professional, natural spoken language.
+    - Make the overview sound conversational rather than
+      like a numbered list of recommendations.
+    - Use 2-3 short sentences, no more than 60 words total.
+    - Do not read URLs aloud.
+    - Do not introduce information beyond the selected resources.
+    - This overview will be spoken after the individual chooses
+      to view their resources.
+    """
+
+    conversation_history = [
+        {
+            "speaker": message.from_,
+            "text": message.text
+        }
+        for message in request.history
+        if message.from_.lower() != "system"
+    ]
+
+    completion = await client.beta.chat.completions.parse(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": json.dumps(conversation_history)
+            }
+        ],
+        temperature=0,
+        response_format=AlexClosingResponse,
+    )
+
+    result = completion.choices[0].message.parsed
+
+    if result is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate resource recommendations."
+        )
+
+    recommendations = [
+        resource.model_dump()
+        for resource in result.recommended_resources
+    ]
+
+    resource_ids = [
+        resource["resource_id"]
+        for resource in recommendations
+    ]
+
+    if len(set(resource_ids)) != 3:
+        raise HTTPException(
+            status_code=502,
+            detail="Duplicate resource recommendations."
+        )
+
+    # Preserve Alex's personalized recommendations.
+    session["recommended_resources"] = recommendations
+    session["alex_material_overview"] = result.spoken_overview
+
+    save_study_sessions()
+
+    return {
+        "speaker": "Alex",
+        "recommended_resources": recommendations,
+        "spoken_overview": result.spoken_overview,
+    }
 
 @router.post("/advance-topic")
 async def advance_study_topic(request: TopicOpeningRequest):

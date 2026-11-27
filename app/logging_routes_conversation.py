@@ -118,6 +118,18 @@ class SuggestedTopicsLog(BaseModel):
         max_length=3,
     )
 
+class NextStepsSelectedRequest(BaseModel):
+    participant_id: str = Field(min_length=1)
+    questions_available: bool
+    questions_selected: bool
+    resources_selected: bool
+
+class MaterialDeliveryLog(BaseModel):
+    participant_id: str = Field(min_length=1)
+    questions_requested: bool
+    resources_requested: bool
+    prolific_message: str | None = None
+
 # ---------------------------------------------------------------------------
 # Entered conversation activity
 # ---------------------------------------------------------------------------
@@ -832,6 +844,99 @@ def log_intro_finished(body: IntroFinishedLog):
 # ---------------------------------------------------------------------------
 # Selected next-step resources
 # ---------------------------------------------------------------------------
+
+@router.post("/log-next-steps-selected")
+def log_next_steps_selected(body: NextStepsSelectedRequest):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    questions_available = ?,
+                    questions_selected = ?,
+                    resources_selected = ?
+                WHERE participant_id = ?
+                """,
+                body.questions_available,
+                body.questions_selected,
+                body.resources_selected,
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "message": "Next-step selections logged.",
+            "participant_id": body.participant_id,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-next-steps-selected] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log next-step selections: {str(exc)}",
+        )
+
+@router.post("/log-material-delivery")
+def log_material_delivery(body: MaterialDeliveryLog):
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET
+                    questions_requested = ?,
+                    resources_requested = ?,
+                    prolific_message = ?
+                WHERE participant_id = ?
+                """,
+                body.questions_requested,
+                body.resources_requested,
+                body.prolific_message,
+                body.participant_id,
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Participant conversation row was not found.",
+                )
+
+            conn.commit()
+
+        return {
+            "success": True,
+            "message": "Material delivery preferences logged.",
+            "participant_id": body.participant_id,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("[log-material-delivery] ERROR:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not log material delivery: {str(exc)}",
+        )
+
 @router.post("/log-recommended-resources")
 def log_recommended_resources(body: RecommendedResourcesLog):
     try:
