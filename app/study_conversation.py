@@ -616,7 +616,7 @@ async def topic_opening(request: TopicOpeningRequest):
     jordan_reply = topic_opening_messages[topic_index] + " " + jordan_reply
 
     return {
-        "speaker": "Jordan",
+        "speaker": "Alex" if session.get("condition") == CONDITION_SINGLE_COMBINED else "Jordan",
         "topic_id": topic["id"],
         "topic_name": topic_name,
         "user_excerpt": user_excerpt,
@@ -1048,8 +1048,20 @@ async def jordan_topic_turn(request: JordanTopicTurnRequest):
             "to get some useful info."
         ]
 
+        if session.get("condition") == CONDITION_SINGLE_COMBINED:
+            handoff_messages = [
+                "Got it, thanks for talking through all that with me! "
+                "Let's explore some information related to what you've shared.",
+
+                "Alright, good to know! Now, let's look at some information "
+                "that might be helpful for you.",
+
+                "Okay, thanks for sharing that with me! "
+                "Let's explore some useful information about this last topic."
+            ]
+
         return {
-            "speaker": "Jordan",
+            "speaker": "Alex" if session.get("condition") == CONDITION_SINGLE_COMBINED else "Jordan",
             "topic_id": topic["id"],
             "jordan_reply": handoff_messages[topic_index],
             "elicitation_complete": True,
@@ -1144,7 +1156,7 @@ async def jordan_topic_turn(request: JordanTopicTurnRequest):
     ).strip()
 
     return {
-        "speaker": "Jordan",
+        "speaker": "Alex" if session.get("condition") == CONDITION_SINGLE_COMBINED else "Jordan",
         "topic_id": topic["id"],
         "jordan_reply": jordan_reply,
         "user_profile": profile,
@@ -1518,7 +1530,7 @@ async def jordan_closing(request: StudyClosingRequest):
     save_study_sessions()
 
     return {
-        "speaker": "Jordan",
+        "speaker": "Alex" if session.get("condition") == CONDITION_SINGLE_COMBINED else "Jordan",
         "reflection": result.reflection,
         "discussion_questions": result.discussion_questions,
         "spoken_overview": result.spoken_overview,
